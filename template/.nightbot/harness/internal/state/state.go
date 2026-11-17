@@ -3,6 +3,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,8 +249,19 @@ func (st *Store) Update(message string, change func(s *State) error) (*State, er
 		if err != nil {
 			return nil, err
 		}
+		before, err := json.Marshal(s)
+		if err != nil {
+			return nil, err
+		}
 		if err := change(s); err != nil {
 			return nil, err
+		}
+		after, err := json.Marshal(s)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(before, after) && sha != "" {
+			return s, nil // nothing changed: no commit on the state branch
 		}
 		data, err := json.MarshalIndent(s, "", "  ")
 		if err != nil {
