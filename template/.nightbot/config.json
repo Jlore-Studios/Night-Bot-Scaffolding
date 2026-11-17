@@ -1,0 +1,59 @@
+{
+  "repo": "OWNER/REPO",
+  "default_branch": "main",
+  "bot_login": "BOT_LOGIN",
+  "operator": "OPERATOR_LOGIN",
+  "timezone": "UTC",
+  "command_prefix": "/nightbot",
+  "trust_collaborators": false,
+  "triage": true,
+
+  "ci_workflow": "CI",
+  "required_checks": [],
+  "auto_merge": true,
+  "merge_method": "squash",
+
+  "checks": [
+    { "name": "tests", "run": "echo 'Replace this with your test command, e.g. npm test, pytest, go test ./...'", "timeout_minutes": 30 }
+  ],
+  "fix_passes": 2,
+  "review_rounds": { "medium": 3, "hard": 6 },
+  "max_audits": 2,
+  "max_ci_fixes": 3,
+  "max_failures": 3,
+
+  "forbidden_paths": [
+    ".nightbot/",
+    ".github/",
+    ".claude/",
+    ".mcp.json",
+    ".gitmodules",
+    ".gitattributes",
+    ".devcontainer/",
+    ".vscode/",
+    ".idea/"
+  ],
+  "review_paths": [
+    "package.json",
+    "**/package-lock.json",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/go.mod",
+    "**/go.sum",
+    "**/Cargo.toml",
+    "**/Cargo.lock",
+    "**/requirements*.txt",
+    "**/pyproject.toml",
+    "**/Dockerfile",
+    "**/*.tf",
+    "**/migrations/**"
+  ],
+
+  "max_turns": { "build": 300, "fix": 200, "review": 100, "ask": 40, "triage": 30 },
+  "call_timeout_minutes": 120,
+  "job_budget_minutes": 300,
+  "park_minutes": 60,
+  "max_diff_chars": 60000,
+
+  "clis": {}
+}

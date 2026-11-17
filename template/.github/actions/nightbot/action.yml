@@ -1,0 +1,21 @@
+name: nightbot harness
+description: Restore the nightbot binary for this version of .nightbot/harness, or build it, and put it on PATH.
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/nightbot-bin
+        key: nightbot-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.nightbot/harness/**') }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: .nightbot/harness/go.mod
+        cache: false
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: .nightbot/harness
+      run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/nightbot-bin/nightbot" ./cmd/nightbot
+    - shell: bash
+      run: echo "$RUNNER_TEMP/nightbot-bin" >> "$GITHUB_PATH"

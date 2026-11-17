@@ -1,0 +1,3 @@
+# Who may command the night bot: one GitHub login a line. The operator in config.json always may,
+# and with "trust_collaborators": true so may anyone GitHub calls an owner, member or collaborator.
+# Comments from anyone else are left out of what the model reads, and their commands do nothing.

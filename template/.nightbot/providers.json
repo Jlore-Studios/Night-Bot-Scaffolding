@@ -1,0 +1,50 @@
+{
+  "max_parallel": 3,
+  "priority": ["claude", "gemini", "codex"],
+  "providers": {
+    "claude": {
+      "enabled": true,
+      "cli": "claude",
+      "models": [
+        { "model": "opus", "effort": "high", "tier": "strong" },
+        { "model": "sonnet", "effort": "high", "tier": "medium" },
+        { "model": "haiku", "tier": "weak" }
+      ],
+      "login": "secret",
+      "secret": "CLAUDE_CODE_OAUTH_TOKEN",
+      "runs_on": "ubuntu-latest",
+      "lanes": 2,
+      "schedule": { "mode": "always" },
+      "limits": { "five_hour_minutes": 240, "seven_day_minutes": 2400 },
+      "note": "A Claude Pro or Max subscription: the token `claude setup-token` prints, as the repository secret CLAUDE_CODE_OAUTH_TOKEN."
+    },
+    "gemini": {
+      "enabled": false,
+      "cli": "gemini",
+      "models": [
+        { "model": "gemini-2.5-pro", "tier": "medium" },
+        { "model": "gemini-2.5-flash", "tier": "weak" }
+      ],
+      "login": "secret",
+      "secret": "GEMINI_API_KEY",
+      "runs_on": "ubuntu-latest",
+      "lanes": 1,
+      "schedule": { "mode": "always" },
+      "limits": { "five_hour_minutes": 120 },
+      "note": "A Gemini API key from Google AI Studio, as the repository secret GEMINI_API_KEY."
+    },
+    "codex": {
+      "enabled": false,
+      "cli": "codex",
+      "models": [
+        { "model": "gpt-5-codex", "effort": "high", "tier": "medium" }
+      ],
+      "login": "machine",
+      "runs_on": "nightbot-codex",
+      "lanes": 1,
+      "schedule": { "mode": "window", "start": "22:00", "end": "07:00" },
+      "limits": {},
+      "note": "A ChatGPT plan through the Codex CLI, logged in once on a machine of your own (`sudo -iu agent-codex codex login --device-auth`), whose runner carries the label nightbot-codex: .nightbot/machine/README.md."
+    }
+  }
+}

@@ -1,0 +1,473 @@
+package bot
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"nightbot/internal/config"
+	"nightbot/internal/github"
+	"nightbot/internal/gitx"
+	"nightbot/internal/job"
+	"nightbot/internal/model"
+	"nightbot/internal/state"
+	"nightbot/internal/work"
+)
+
+// fakeCLI stands in for a model CLI: it answers by the prompt's heading, and FAKE_MODE and the
+// files in FAKE_DIR change what it does.
+const fakeCLI = `#!/bin/bash
+prompt=$(cat)
+echo "$prompt" | grep -m1 '^# ' >> "$FAKE_DIR/calls"
+if [ "$(cat "$FAKE_DIR/mode" 2>/dev/null)" = ratelimit ]; then
+  echo "Error: usage limit reached, try again in 30 minutes" >&2
+  exit 1
+fi
+case "$prompt" in
+  *"# Adversarial review"*)
+    if [ -f "$FAKE_DIR/verdicts" ] && [ -s "$FAKE_DIR/verdicts" ]; then
+      head -n1 "$FAKE_DIR/verdicts"; sed -i 1d "$FAKE_DIR/verdicts"
+    else
+      echo '{"verdict": "approve", "summary": "It does what the issue asks.", "findings": []}'
+    fi
+    echo "stray" > review-scratch.txt ;;
+  *"# Build "*)
+    echo hello > hello.txt
+    mkdir -p .github/workflows && echo evil > .github/workflows/evil.yml
+    echo "I added hello.txt." ;;
+  *"# Revise "*)
+    echo fixed >> hello.txt
+    echo "Fixed what was asked." ;;
+  *"# A question"*)
+    echo "The answer is 42." ;;
+  *"# Triage"*)
+    printf '%s\n' '{"difficulty": "hard", "summary": "It touches everything."}' ;;
+esac
+`
+
+type env struct {
+	t         *testing.T
+	gh        *github.Fake
+	cfg       *config.Config
+	bot       *Bot
+	origin    string
+	workspace string // where the model job works
+	fakeDir   string
+}
+
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := (&gitx.Repo{Dir: dir}).Git(args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func copyDir(t *testing.T, from, to string) {
+	t.Helper()
+	if out, err := exec.Command("cp", "-R", from, to).CombinedOutput(); err != nil {
+		t.Fatalf("cp: %v %s", err, out)
+	}
+}
+
+func newEnv(t *testing.T, edit func(cfg map[string]any)) *env {
+	t.Helper()
+	dir := t.TempDir()
+	e := &env{t: t, gh: github.NewFake(), origin: filepath.Join(dir, "origin.git"), fakeDir: filepath.Join(dir, "fake")}
+	os.MkdirAll(e.fakeDir, 0o755)
+	script := filepath.Join(dir, "fake-cli.sh")
+	os.WriteFile(script, []byte(fakeCLI), 0o755)
+
+	git(t, dir, "init", "-q", "--bare", "-b", "main", e.origin)
+	seed := filepath.Join(dir, "seed")
+	git(t, dir, "init", "-q", "-b", "main", seed)
+	os.MkdirAll(filepath.Join(seed, config.Dir), 0o755)
+	template, _ := filepath.Abs("../../..") // template/.nightbot
+	copyDir(t, filepath.Join(template, "prompts"), filepath.Join(seed, config.Dir, "prompts"))
+	cfg := map[string]any{
+		"repo": "o/r", "bot_login": "nightbot", "operator": "boss", "timezone": "UTC", "triage": false,
+		"required_checks": []string{"CI"}, "auto_merge": true,
+		"checks":          []map[string]any{{"name": "hello", "run": "test -f hello.txt"}},
+		"forbidden_paths": []string{".nightbot/", ".github/"},
+		"review_paths":    []string{"go.mod"},
+		"clis":            map[string]any{"fake": map[string]any{"argv": []string{"bash", script}, "prompt": "stdin", "answer": "stdout", "secret_env": "FAKE_TOKEN"}},
+	}
+	if edit != nil {
+		edit(cfg)
+	}
+	providers := map[string]any{"max_parallel": 2, "providers": map[string]any{
+		"main": map[string]any{"enabled": true, "cli": "fake", "login": "secret", "secret": "FAKE_TOKEN", "lanes": 2,
+			"models": []map[string]string{{"model": "big", "tier": "strong"}, {"model": "mid", "tier": "medium"}, {"model": "tiny", "tier": "weak"}}},
+	}}
+	for name, v := range map[string]any{"config.json": cfg, "providers.json": providers} {
+		data, _ := json.MarshalIndent(v, "", "  ")
+		os.WriteFile(filepath.Join(seed, config.Dir, name), data, 0o644)
+	}
+	os.WriteFile(filepath.Join(seed, "README.md"), []byte("# A repository\n"), 0o644)
+	git(t, seed, "add", "-A")
+	git(t, seed, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "seed")
+	git(t, seed, "push", "-q", e.origin, "main")
+
+	e.workspace = filepath.Join(dir, "work")
+	git(t, dir, "clone", "-q", e.origin, e.workspace)
+	deliverer := filepath.Join(dir, "deliver")
+	git(t, dir, "clone", "-q", e.origin, deliverer)
+
+	loaded, err := config.Load(e.workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.cfg = loaded
+	e.gh.Required = []string{"CI"}
+	e.bot = New(loaded, e.gh, nil)
+	e.bot.Workspace = deliverer
+	e.bot.Secrets = map[string]bool{"FAKE_TOKEN": true}
+	e.bot.Log = testWriter{t}
+	t.Setenv("FAKE_DIR", e.fakeDir)
+	t.Setenv("NIGHTBOT_GITHUB_TOKEN", "test-token")
+	if err := e.bot.Setup(false); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
+// run is one whole run: plan, the model job, deliver. It returns the plan and the result.
+func (e *env) run(opts PlanOptions) (*job.Plan, *job.Result) {
+	e.t.Helper()
+	p, why, err := e.bot.Plan(opts)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if p == nil {
+		e.t.Fatalf("nothing planned: %s", why)
+	}
+	out := e.t.TempDir()
+	w := &work.Worker{Cfg: e.cfg, Plan: p, Out: out, Repo: &gitx.Repo{Dir: e.workspace}, Log: testWriter{e.t},
+		Runner:   &model.Runner{Name: p.CLI, CLI: e.cfg.CLIs[p.CLI], Secret: "fake-secret-123", TempDir: e.t.TempDir()},
+		Deadline: time.Now().Add(time.Hour)}
+	r := w.Do()
+	if err := e.bot.Deliver(p, out, "success"); err != nil {
+		e.t.Fatal(err)
+	}
+	return p, r
+}
+
+func (e *env) state() *state.State {
+	st, _, err := e.bot.Store.Load()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return st
+}
+
+func (e *env) calls() []string {
+	data, _ := os.ReadFile(filepath.Join(e.fakeDir, "calls"))
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func TestFlow_BuildReviewApproveAndAutoMerge(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please add hello.txt.", "boss", "bot:build", "difficulty:medium")
+
+	p, r := e.run(PlanOptions{})
+	if p.Action != "build" || p.Model != "mid" || p.Tier != "medium" {
+		t.Fatalf("plan: %s on %s (%s)", p.Action, p.Model, p.Tier)
+	}
+	if r.Outcome != job.Approved || !r.ChecksGreen || r.Rounds != 1 {
+		t.Fatalf("result: %+v", r)
+	}
+	if !slices.Contains(r.Reverted, ".github/workflows/evil.yml") || !slices.Equal(r.Changed, []string{"hello.txt"}) {
+		t.Fatalf("forbidden path kept: reverted %v changed %v", r.Reverted, r.Changed)
+	}
+	if strings.Contains(git(t, e.workspace, "status", "--porcelain"), "review-scratch") {
+		t.Error("the reviewer's stray file survived its read-only call")
+	}
+	// The branch is on the origin with the change and nothing forbidden.
+	files := git(t, e.origin, "ls-tree", "-r", "--name-only", p.Branch)
+	if !strings.Contains(files, "hello.txt") || strings.Contains(files, "evil.yml") {
+		t.Fatalf("pushed tree: %s", files)
+	}
+	pr, _ := e.gh.FindPR(p.Branch)
+	if pr == nil || pr.Draft || e.gh.AutoMerge[pr.Number] != "squash" {
+		t.Fatalf("pull request: %+v, auto-merge %q", pr, e.gh.AutoMerge[pr.Number])
+	}
+	if labels := e.gh.LabelsOf(n); slices.Contains(labels, "bot:build") || slices.Contains(labels, "bot:building") {
+		t.Errorf("issue labels: %v", labels)
+	}
+	if !slices.Contains(e.gh.LabelsOf(pr.Number), "bot:pr") {
+		t.Errorf("pull request labels: %v", e.gh.LabelsOf(pr.Number))
+	}
+	st := e.state()
+	if len(st.Running) != 0 || st.Peek(n).PR != pr.Number || st.Peek(pr.Number).Issue != n || len(st.History) != 1 {
+		t.Fatalf("state: %+v", st)
+	}
+	if want := []string{"# Build issue #1: Add hello", "# Adversarial review of #1: Add hello"}; !slices.Equal(e.calls(), want) {
+		t.Errorf("calls: %q", e.calls())
+	}
+}
+
+func TestFlow_RoundsRunOutThenAnAuditApproves(t *testing.T) {
+	e := newEnv(t, func(cfg map[string]any) { cfg["review_rounds"] = map[string]int{"medium": 2, "hard": 2} })
+	block := `{"verdict": "request_changes", "summary": "no", "findings": [{"severity": "blocking", "problem": "it is wrong"}]}`
+	os.WriteFile(filepath.Join(e.fakeDir, "verdicts"), []byte(block+"\n"+block+"\n"), 0o644)
+	e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+
+	p, r := e.run(PlanOptions{})
+	if r.Outcome != job.Unapproved || r.Rounds != 2 {
+		t.Fatalf("result: %+v", r)
+	}
+	pr, _ := e.gh.FindPR(p.Branch)
+	if !pr.Draft || !slices.Contains(e.gh.LabelsOf(pr.Number), "bot:review") || len(e.gh.AutoMerge) != 0 {
+		t.Fatalf("an unapproved change should wait for an audit as a draft: %+v %v", pr, e.gh.LabelsOf(pr.Number))
+	}
+	// GitHub keeps every pull request's head at refs/pull/<n>/head; the local origin needs it made.
+	git(t, e.origin, "update-ref", fmt.Sprintf("refs/pull/%d/head", pr.Number), "refs/heads/"+p.Branch)
+	audit, r := e.run(PlanOptions{})
+	if audit.Action != "review" || audit.Number != pr.Number || r.Outcome != job.Reviewed || !r.Approved {
+		t.Fatalf("audit: %+v %+v", audit, r)
+	}
+	if e.gh.AutoMerge[pr.Number] != "squash" || len(e.gh.Reviews[pr.Number]) != 1 {
+		t.Fatalf("the audit's approval should ship it: %v %v", e.gh.AutoMerge, e.gh.Reviews)
+	}
+}
+
+func TestFlow_CIFailureQueuesARevision(t *testing.T) {
+	e := newEnv(t, nil)
+	e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	p, _ := e.run(PlanOptions{})
+	pr, _ := e.gh.FindPR(p.Branch)
+	before := git(t, e.origin, "rev-parse", p.Branch)
+
+	ev := &Event{}
+	json.Unmarshal([]byte(`{"workflow_run": {"id": 77, "name": "CI", "conclusion": "failure", "head_branch": "`+p.Branch+`", "html_url": "https://ci/77"}}`), ev)
+	if err := e.bot.Handle("workflow_run", ev); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.gh.LabelsOf(pr.Number), "bot:revise") {
+		t.Fatalf("labels: %v", e.gh.LabelsOf(pr.Number))
+	}
+	revise, r := e.run(PlanOptions{})
+	if revise.Action != "revise" || revise.CIRun != 77 || !strings.Contains(revise.Request, "https://ci/77") {
+		t.Fatalf("plan: %+v", revise)
+	}
+	if r.Outcome != job.Approved {
+		t.Fatalf("result: %+v", r)
+	}
+	after := git(t, e.origin, "rev-parse", p.Branch)
+	if after == before || git(t, e.origin, "merge-base", "--is-ancestor", before, after) != "" {
+		t.Fatalf("the revision should move the branch forward: %s -> %s", before, after)
+	}
+	if slices.Contains(e.gh.LabelsOf(pr.Number), "bot:revise") || len(e.state().Peek(pr.Number).Notes) != 0 {
+		t.Error("the revision's request should be used up")
+	}
+}
+
+func TestFlow_DeliverRefusesABundleWithAForbiddenPath(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	p, why, err := e.bot.Plan(PlanOptions{})
+	if err != nil || p == nil {
+		t.Fatal(why, err)
+	}
+	// A model job that ignored the harness: a commit to .github/ in its bundle.
+	git(t, e.workspace, "checkout", "-q", "-B", p.Branch, "origin/main")
+	os.MkdirAll(filepath.Join(e.workspace, ".github"), 0o755)
+	os.WriteFile(filepath.Join(e.workspace, ".github", "evil.yml"), []byte("x"), 0o644)
+	git(t, e.workspace, "add", "-A")
+	git(t, e.workspace, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "evil")
+	out := t.TempDir()
+	base := git(t, e.workspace, "rev-parse", "origin/main")
+	git(t, e.workspace, "bundle", "create", filepath.Join(out, "change.bundle"), "refs/heads/"+p.Branch, "^"+base)
+	job.Write(filepath.Join(out, "result.json"), &job.Result{Action: "build", Outcome: job.Approved, Approved: true,
+		Bundle: "change.bundle", Base: base, Changed: []string{"x"}})
+
+	if err := e.bot.Deliver(p, out, "success"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&gitx.Repo{Dir: e.origin}).Git("rev-parse", "--verify", p.Branch); err == nil {
+		t.Fatal("pushed a forbidden path")
+	}
+	if !e.gh.HasComment(n, "forbidden paths") || e.state().Peek(n).Failures != 1 {
+		t.Fatalf("comments: %q", e.gh.CommentsOn(n))
+	}
+}
+
+func TestFlow_AQuestionGoesToTheWeakModel(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Something", "Body.", "someone")
+	id := e.gh.AddComment(n, "boss", "OWNER", "@nightbot what does this repository do?")
+	ev := &Event{Action: "created", Issue: &github.Issue{Number: n},
+		Comment: &github.Comment{ID: id, Body: "@nightbot what does this repository do?", User: github.User{Login: "boss"}, AuthorAssociation: "OWNER"}}
+	if err := e.bot.Handle("issue_comment", ev); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.state().Queries) != 1 || !slices.Contains(e.gh.Reactions[id], "eyes") {
+		t.Fatalf("not queued: %+v", e.state().Queries)
+	}
+	// The same comment again (an edit, a redelivery) asks nothing more.
+	e.bot.Handle("issue_comment", ev)
+	if len(e.state().Queries) != 1 {
+		t.Fatal("asked twice")
+	}
+	p, r := e.run(PlanOptions{})
+	if p.Action != "ask" || p.Model != "tiny" || p.Tier != "weak" || r.Outcome != job.Answered {
+		t.Fatalf("plan %+v result %+v", p, r)
+	}
+	if !e.gh.HasComment(n, "@boss The answer is 42.") || len(e.state().Queries) != 0 {
+		t.Fatalf("comments: %q", e.gh.CommentsOn(n))
+	}
+}
+
+func TestFlow_UntrustedCommandsDoNothing(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Something", "Body.", "someone")
+	ev := &Event{Action: "created", Issue: &github.Issue{Number: n},
+		Comment: &github.Comment{ID: 5, Body: "/nightbot build", User: github.User{Login: "stranger"}, AuthorAssociation: "NONE"}}
+	e.bot.Handle("issue_comment", ev)
+	if slices.Contains(e.gh.LabelsOf(n), "bot:build") || len(e.gh.CommentsOn(n)) != 0 {
+		t.Fatal("a stranger queued work")
+	}
+}
+
+func TestFlow_TriageRatesThenAStrongModelBuilds(t *testing.T) {
+	e := newEnv(t, func(cfg map[string]any) { cfg["triage"] = true })
+	n := e.gh.AddIssue("Rewrite everything", "Please.", "boss", "bot:build")
+	p, r := e.run(PlanOptions{})
+	if p.Action != "triage" || p.Model != "tiny" || r.Triage.Difficulty != "hard" {
+		t.Fatalf("plan %+v result %+v", p, r)
+	}
+	if !slices.Contains(e.gh.LabelsOf(n), "difficulty:hard") {
+		t.Fatalf("labels: %v", e.gh.LabelsOf(n))
+	}
+	p, _ = e.run(PlanOptions{})
+	if p.Action != "build" || p.Model != "big" || p.ReviewRounds != 6 {
+		t.Fatalf("the hard build went to %s with %d rounds", p.Model, p.ReviewRounds)
+	}
+}
+
+func TestFlow_ARefusalParksTheProviderAndKeepsTheItem(t *testing.T) {
+	e := newEnv(t, nil)
+	os.WriteFile(filepath.Join(e.fakeDir, "mode"), []byte("ratelimit"), 0o644)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	start := time.Now()
+	_, r := e.run(PlanOptions{})
+	if r.Outcome != job.RateLimited {
+		t.Fatalf("result: %+v", r)
+	}
+	until := e.state().Parked["main"]
+	if until.Before(start.Add(29*time.Minute)) || until.After(time.Now().Add(31*time.Minute)) {
+		t.Fatalf("parked until %v", until)
+	}
+	if !slices.Contains(e.gh.LabelsOf(n), "bot:build") || len(e.gh.PRs) != 0 {
+		t.Fatal("the item should stay queued with no pull request")
+	}
+	if p, why, _ := e.bot.Plan(PlanOptions{}); p != nil || !strings.Contains(why, "usage limit") {
+		t.Fatalf("a parked provider took work: %v %s", p, why)
+	}
+}
+
+func TestFlow_SweepReleasesALostRunAndDrawsTheStatus(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	e.bot.RunID = 99
+	if p, _, err := e.bot.Plan(PlanOptions{}); err != nil || p == nil {
+		t.Fatal(err)
+	}
+	e.gh.Runs[99] = &github.Run{ID: 99, Status: "completed", Conclusion: "cancelled"}
+	if err := e.bot.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.state().Running) != 0 || slices.Contains(e.gh.LabelsOf(n), "bot:building") {
+		t.Fatal("the lost claim is still held")
+	}
+	status, _ := e.gh.ListIssues("bot:status", "open")
+	if len(status) != 1 || !strings.Contains(status[0].Body, "## Providers") || !strings.Contains(status[0].Body, "#1 Add hello") {
+		t.Fatalf("status issue: %+v", status)
+	}
+	if len(e.gh.Dispatched) == 0 {
+		t.Error("the sweep should start a run for the queued item")
+	}
+}
+
+func TestFlow_HaltAndCommands(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss")
+	say := func(body string) {
+		id := e.gh.AddComment(n, "boss", "OWNER", body)
+		e.bot.Handle("issue_comment", &Event{Action: "created", Issue: &github.Issue{Number: n},
+			Comment: &github.Comment{ID: id, Body: body, User: github.User{Login: "boss"}, AuthorAssociation: "OWNER"}})
+	}
+	say("/nightbot halt")
+	if !e.state().Halted {
+		t.Fatal("not halted")
+	}
+	say("/nightbot build")
+	if !slices.Contains(e.gh.LabelsOf(n), "bot:build") {
+		t.Fatal("build should still queue while halted")
+	}
+	if p, why, _ := e.bot.Plan(PlanOptions{}); p != nil || !strings.Contains(why, "halted by @boss") {
+		t.Fatalf("planned while halted: %s", why)
+	}
+	say("/nightbot start\n/nightbot suspend main testing it")
+	if st := e.state(); st.Halted || st.Suspended["main"] != "testing it" {
+		t.Fatalf("state: %+v", st)
+	}
+	say("/nightbot resume main")
+	if p, _, _ := e.bot.Plan(PlanOptions{}); p == nil {
+		t.Fatal("nothing planned after start and resume")
+	}
+}
+
+func TestParseCommands(t *testing.T) {
+	cases := []struct {
+		body string
+		want []Command
+	}{
+		{"/nightbot build --force", []Command{{Verb: "build", Force: true, Text: "--force"}}},
+		{"please\n/nightbot ask why is the sky blue?\n", []Command{{Verb: "ask", Args: []string{"why", "is", "the", "sky", "blue?"}, Text: "why is the sky blue?"}}},
+		{"> /nightbot halt\n```\n/nightbot halt\n```", nil},
+		{"hey @nightbot, does this work?", []Command{{Verb: "mention", Text: "hey , does this work?"}}},
+		{"mail me at someone@nightbot.example", nil},
+		{"/nightbot", []Command{{Verb: "help"}}},
+	}
+	for _, c := range cases {
+		got := ParseCommands(c.body, "/nightbot", "nightbot")
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(c.want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("%q:\n got %s\nwant %s", c.body, gotJSON, wantJSON)
+		}
+	}
+}
+
+func TestFlow_SweepNoticesAPullRequestClosedWithoutAnEvent(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	p, _ := e.run(PlanOptions{})
+	pr, _ := e.gh.FindPR(p.Branch)
+	e.gh.PRs[pr.Number].State = "closed" // closed by a person, unmerged; no event arrived
+	e.gh.AddLabels(n, "bot:build")
+	if err := e.bot.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if mem := e.state().Peek(n); mem.PR != 0 {
+		t.Fatalf("the issue still waits on #%d", mem.PR)
+	}
+	if again, _, _ := e.bot.Plan(PlanOptions{}); again == nil || again.Number != n || again.Action != "build" {
+		t.Fatalf("the issue should build again: %+v", again)
+	}
+}
