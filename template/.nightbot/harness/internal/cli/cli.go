@@ -255,6 +255,9 @@ func doWork(cfg *config.Config, planFile, out string, log io.Writer) error {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
+	if err := hide(); err != nil {
+		return fmt.Errorf("could not make the work job's process private: %w", err)
+	}
 	secret := ""
 	if p.Login == "secret" {
 		secret = os.Getenv("NIGHTBOT_MODEL_SECRET")
@@ -268,9 +271,11 @@ func doWork(cfg *config.Config, planFile, out string, log io.Writer) error {
 		temp = os.TempDir()
 	}
 	// The harness's own fetches need the run's read-only token in a private repository (the
-	// checkout keeps no credentials); the model's environment never gets it.
-	repo := &gitx.Repo{Dir: cfg.Root, Env: gitx.AuthEnv(os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_TOKEN"))}
-	w := &work.Worker{Cfg: cfg, Plan: p, Out: out, Repo: repo, Log: log,
+	// checkout keeps no credentials). They all happen before the first model call, through Auth;
+	// every git command after that runs without it, so no hook or filter a model leaves in the
+	// checkout can catch it. The model's environment never has it.
+	auth := &gitx.Repo{Dir: cfg.Root, Env: gitx.AuthEnv(os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_TOKEN"))}
+	w := &work.Worker{Cfg: cfg, Plan: p, Out: out, Repo: &gitx.Repo{Dir: cfg.Root}, Auth: auth, Log: log,
 		Runner:   &model.Runner{Name: p.CLI, CLI: cfg.CLIs[p.CLI], Secret: secret, TempDir: temp, Location: cfg.Location},
 		Deadline: time.Now().Add(time.Duration(cfg.JobBudgetMinutes) * time.Minute)}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {

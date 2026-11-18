@@ -15,20 +15,30 @@ var ErrNotFound = errors.New("github: not found")
 
 // Issue is an issue or a pull request, as the issues API lists both.
 type Issue struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	State     string    `json:"state"`
-	User      User      `json:"user"`
-	Labels    []Label   `json:"labels"`
-	Assignees []User    `json:"assignees"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	HTMLURL   string    `json:"html_url"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	User   User   `json:"user"`
+	// AuthorAssociation is the author's relation to the repository (OWNER, MEMBER, …).
+	AuthorAssociation string    `json:"author_association"`
+	Labels            []Label   `json:"labels"`
+	Assignees         []User    `json:"assignees"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	HTMLURL           string    `json:"html_url"`
 	// PullRequest is set when the issue is a pull request.
 	PullRequest *struct {
 		URL string `json:"url"`
 	} `json:"pull_request,omitempty"`
+}
+
+// HeadRepo is the repository a pull request's branch lives in ("" when it was deleted).
+func (p *PR) HeadRepo() string {
+	if p.Head.Repo == nil {
+		return ""
+	}
+	return p.Head.Repo.FullName
 }
 
 // IsPR says whether the issue is a pull request.
@@ -67,18 +77,22 @@ type Comment struct {
 
 // PR is a pull request.
 type PR struct {
-	Number  int    `json:"number"`
-	NodeID  string `json:"node_id"`
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	State   string `json:"state"`
-	Draft   bool   `json:"draft"`
-	Merged  bool   `json:"merged"`
-	HTMLURL string `json:"html_url"`
-	User    User   `json:"user"`
-	Head    struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
+	Number            int    `json:"number"`
+	NodeID            string `json:"node_id"`
+	Title             string `json:"title"`
+	Body              string `json:"body"`
+	State             string `json:"state"`
+	Draft             bool   `json:"draft"`
+	Merged            bool   `json:"merged"`
+	HTMLURL           string `json:"html_url"`
+	User              User   `json:"user"`
+	AuthorAssociation string `json:"author_association"`
+	Head              struct {
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
@@ -132,7 +146,8 @@ type Client interface {
 	ListComments(number int) ([]*Comment, error)
 	CreateComment(number int, body string) (int64, error)
 	UpdateComment(id int64, body string) error
-	AddReaction(commentID int64, content string) error
+	// AddReaction reacts to an issue comment, or with review to a pull request review comment.
+	AddReaction(commentID int64, content string, review bool) error
 	AddLabels(number int, labels ...string) error
 	RemoveLabel(number int, label string) error
 	EnsureLabel(name, color, description string) error
@@ -144,7 +159,11 @@ type Client interface {
 	ListReviews(number int) ([]*Review, error)
 	CreateReview(number int, body string) error
 	MarkReady(pr *PR) error
-	EnableAutoMerge(pr *PR, method string) error
+	// EnableAutoMerge merges the pull request once its checks pass, but only while its head is
+	// still headSHA: a push after the approval turns it off.
+	EnableAutoMerge(pr *PR, method, headSHA string) error
+	// DisableAutoMerge turns auto-merge off and makes the pull request a draft again.
+	DisableAutoMerge(pr *PR) error
 
 	RequiredChecks(branch string) ([]string, error)
 	DispatchWorkflow(file, ref string, inputs map[string]string) error

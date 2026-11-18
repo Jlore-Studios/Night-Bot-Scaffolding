@@ -1,4 +1,4 @@
-# Triage issue #{{.number}}: {{.title}}
+# Triage issue #{{.number}}
 
 Rate how hard this issue is to build, so the harness gives it to a strong enough model. Read the
 code it touches (read-only; the harness throws away any change). Do not build it.

@@ -39,10 +39,13 @@ type JobRef struct {
 
 // Worker does one plan's model work.
 type Worker struct {
-	Cfg      *config.Config
-	Plan     *job.Plan
-	Out      string
-	Repo     *gitx.Repo
+	Cfg  *config.Config
+	Plan *job.Plan
+	Out  string
+	Repo *gitx.Repo
+	// Auth is the checkout with the read-only token, for the fetches made before any model runs;
+	// after that the harness's git carries no token a model's hook or filter could catch.
+	Auth     *gitx.Repo
 	Runner   *model.Runner
 	CI       CILogs
 	Deadline time.Time
@@ -51,8 +54,9 @@ type Worker struct {
 	// RunCheck runs one check command; a seam for the tests.
 	RunCheck func(ctx context.Context, command, dir string, env []string) (string, error)
 
-	result *job.Result
-	system string
+	result    *job.Result
+	system    string
+	templates prompts.Templates
 }
 
 // minCallMinutes is the least time left for a model call to be worth starting.
@@ -76,11 +80,12 @@ func (w *Worker) Do() *job.Result {
 			fmt.Fprintln(w.Log, "result.json:", err)
 		}
 	}()
-	system, err := prompts.Render(w.Cfg, "system", w.vars(nil))
+	templates, err := prompts.Load(w.Cfg)
 	if err != nil {
 		panic(err)
 	}
-	w.system = system
+	w.templates = templates
+	w.system = w.render("system", nil)
 	w.Repo.MustGit("config", "user.name", w.Cfg.BotLogin)
 	w.Repo.MustGit("config", "user.email", noreply(w.Cfg.BotLogin))
 	switch w.Plan.Action {
@@ -105,6 +110,23 @@ func noreply(login string) string {
 	return login + "@users.noreply.github.com"
 }
 
+// auth is the checkout for a fetch, which needs the token in a private repository.
+func (w *Worker) auth() *gitx.Repo {
+	if w.Auth != nil {
+		return w.Auth
+	}
+	return w.Repo
+}
+
+// render fills a template from memory with the common variables and extra.
+func (w *Worker) render(name string, extra map[string]string) string {
+	text, err := w.templates.Render(w.Cfg, name, w.vars(extra))
+	if err != nil {
+		panic(err)
+	}
+	return text
+}
+
 // vars are the template variables every prompt has, plus extra.
 func (w *Worker) vars(extra map[string]string) map[string]string {
 	p := w.Plan
@@ -116,7 +138,7 @@ func (w *Worker) vars(extra map[string]string) map[string]string {
 		checks = append(checks, "- (none configured: run what the repository's README says)")
 	}
 	v := map[string]string{
-		"number": fmt.Sprint(p.Number), "title": p.Title, "thread": p.Thread, "branch": p.Branch,
+		"number": fmt.Sprint(p.Number), "title": prompts.Fence("title", p.Title), "thread": p.Thread, "branch": p.Branch,
 		"base": p.Base, "difficulty": p.Difficulty, "model": p.Model, "provider": p.Provider,
 		"checks_list": strings.Join(checks, "\n"), "kind": map[bool]string{true: "pull request", false: "issue"}[p.IsPR],
 		"forbidden_paths": strings.Join(w.Cfg.ForbiddenPaths, ", "),
@@ -177,7 +199,8 @@ func (w *Worker) discard(head string) {
 }
 
 // commit folds everything since head (the model's own commits too) into one commit, after
-// putting back any forbidden path. It reports whether there was anything to commit.
+// putting back any forbidden path. It reports whether there was anything to commit, and panics
+// rather than commit a forbidden path it could not put back.
 func (w *Worker) commit(head, message string) bool {
 	w.Repo.MustGit("reset", "-q", "--soft", head)
 	dirty, err := w.Repo.Dirty()
@@ -189,15 +212,26 @@ func (w *Worker) commit(head, message string) bool {
 			continue
 		}
 		if _, err := w.Repo.Git("cat-file", "-e", head+":"+path); err == nil {
-			w.Repo.MustGit("checkout", head, "--", path)
+			w.Repo.MustGit("checkout", head, "--", gitx.Literal(path))
 		} else {
-			w.Repo.MustGit("rm", "-q", "-f", "--cached", "--ignore-unmatch", "--", path)
-			os.Remove(filepath.Join(w.Repo.Dir, path))
+			w.Repo.MustGit("rm", "-q", "-r", "-f", "--cached", "--ignore-unmatch", "--", gitx.Literal(path))
+			if err := os.RemoveAll(filepath.Join(w.Repo.Dir, path)); err != nil {
+				panic(fmt.Sprintf("could not remove the forbidden path %q: %v", path, err))
+			}
 		}
 		w.result.Reverted = appendNew(w.result.Reverted, path)
 	}
 	w.Repo.MustGit("add", "-A")
-	if _, err := w.Repo.Git("diff", "--cached", "--quiet"); err == nil {
+	staged, err := w.Repo.Staged(head)
+	if err != nil {
+		panic(err)
+	}
+	for _, path := range staged {
+		if config.MatchAny(w.Cfg.ForbiddenPaths, path) {
+			panic(fmt.Sprintf("could not put back the forbidden path %q", path))
+		}
+	}
+	if len(staged) == 0 {
 		return false
 	}
 	w.Repo.MustGit("commit", "-q", "--no-verify", "-m", message)
@@ -223,10 +257,10 @@ func (w *Worker) note(text string) {
 // checkout puts the item's branch at HEAD and reports the base the change is measured from.
 func (w *Worker) checkout(existing bool) string {
 	p := w.Plan
-	w.Repo.MustGit("fetch", "-q", "origin", p.Base)
+	w.auth().MustGit("fetch", "-q", "origin", p.Base)
 	base := "origin/" + p.Base
 	if existing {
-		w.Repo.MustGit("fetch", "-q", "origin", "+refs/heads/"+p.Branch+":refs/remotes/origin/"+p.Branch)
+		w.auth().MustGit("fetch", "-q", "origin", "+refs/heads/"+p.Branch+":refs/remotes/origin/"+p.Branch)
 		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Branch)
 		sha := w.Repo.MustGit("merge-base", base, "HEAD")
 		w.result.Base = sha
@@ -238,6 +272,18 @@ func (w *Worker) checkout(existing bool) string {
 	return sha
 }
 
+// fetchPR fetches a pull request's head (also a fork's) and returns its ref, holding it to the
+// head the plan saw.
+func (w *Worker) fetchPR() string {
+	p := w.Plan
+	ref := fmt.Sprintf("refs/remotes/origin/pr-%d", p.Number)
+	w.auth().MustGit("fetch", "-q", "origin", p.Base, fmt.Sprintf("+refs/pull/%d/head:%s", p.Number, ref))
+	if head := w.Repo.MustGit("rev-parse", ref); p.Head != "" && head != p.Head {
+		panic(fmt.Sprintf("#%d moved from %.12s to %.12s since it was planned; it will be looked at again", p.Number, p.Head, head))
+	}
+	return ref
+}
+
 func (w *Worker) build() {
 	base := w.checkout(w.Plan.Continue)
 	carry := ""
@@ -245,10 +291,7 @@ func (w *Worker) build() {
 		carry = "The branch already holds earlier work on this item (an earlier run was cut off). Read `git log " +
 			base[:12] + "..HEAD` and carry it on rather than starting over."
 	}
-	prompt, err := prompts.Render(w.Cfg, "build", w.vars(map[string]string{"continue": carry}))
-	if err != nil {
-		panic(err)
-	}
+	prompt := w.render("build", map[string]string{"continue": carry})
 	head := w.Repo.MustGit("rev-parse", "HEAD")
 	o, ok := w.call("build", true, prompt)
 	if o != nil {
@@ -285,12 +328,9 @@ func (w *Worker) revise() {
 	if logs := w.ciLogs(); logs != "" {
 		request += "\n\n## The failing CI jobs (the end of each log)\n\n" + logs
 	}
-	prompt, err := prompts.Render(w.Cfg, "fix", w.vars(map[string]string{
+	prompt := w.render("fix", map[string]string{
 		"request": prompts.Fence("requests", request), "checks": "(not run yet for this revision)",
-		"findings": "(none: this revision answers the request above)"}))
-	if err != nil {
-		panic(err)
-	}
+		"findings": "(none: this revision answers the request above)"})
 	head := w.Repo.MustGit("rev-parse", "HEAD")
 	o, ok := w.call("fix", true, prompt)
 	if o != nil {
@@ -306,17 +346,29 @@ func (w *Worker) revise() {
 	w.finish(base, "")
 }
 
-// audit reviews a pull request as it stands; it changes nothing.
+// audit reviews a pull request as it stands; it changes nothing. An untrusted one (another
+// repository's, or a stranger's) is never checked out: the model reads its diff from the trusted
+// base, and none of its code, checks, CLI settings or prompts run.
 func (w *Worker) audit() {
 	p := w.Plan
-	w.Repo.MustGit("fetch", "-q", "origin", p.Base,
-		fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pr-%d", p.Number, p.Number))
-	w.Repo.MustGit("checkout", "-q", "-B", p.Branch, fmt.Sprintf("origin/pr-%d", p.Number))
-	base := w.Repo.MustGit("merge-base", "origin/"+p.Base, "HEAD")
+	ref := w.fetchPR()
+	head := ref
+	if p.Untrusted {
+		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Base)
+	} else {
+		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, ref)
+		head = "HEAD"
+	}
+	base := w.Repo.MustGit("merge-base", "origin/"+p.Base, ref)
 	w.result.Base = base
-	w.result.Checks = w.runChecks()
-	w.result.ChecksGreen = allGreen(w.result.Checks)
-	v, ok := w.review(base, 1, 1, nil)
+	if p.Untrusted {
+		w.result.ChecksGreen = true
+		w.note("The checks did not run: this pull request comes from outside the trust list, so none of its code runs here.")
+	} else {
+		w.result.Checks = w.runChecks()
+		w.result.ChecksGreen = allGreen(w.result.Checks)
+	}
+	v, ok := w.review(base, head, 1, 1, nil)
 	if !ok {
 		w.result.Outcome = job.RateLimited
 		if !w.result.RateLimited {
@@ -328,21 +380,29 @@ func (w *Worker) audit() {
 	w.result.Rounds = 1
 	w.result.Approved = v.Approves() && w.result.ChecksGreen
 	w.result.Outcome = job.Reviewed
-	w.result.Head = w.Repo.MustGit("rev-parse", "HEAD")
+	w.result.Head = w.Repo.MustGit("rev-parse", ref)
 }
 
 func (w *Worker) ask() {
-	if w.Plan.IsPR {
-		w.Repo.MustGit("fetch", "-q", "origin", fmt.Sprintf("+refs/pull/%d/head:refs/remotes/origin/pr-%d", w.Plan.Number, w.Plan.Number))
-		w.Repo.MustGit("checkout", "-q", "-B", w.Plan.Branch, fmt.Sprintf("origin/pr-%d", w.Plan.Number))
+	p := w.Plan
+	change := ""
+	if p.IsPR {
+		ref := w.fetchPR()
+		if p.Untrusted {
+			w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Base)
+			base := w.Repo.MustGit("merge-base", "origin/"+p.Base, ref)
+			diff, _ := w.Repo.Git("diff", base, ref)
+			change = "## The pull request's change\n\nIt is not checked out (it comes from outside the trust list); this is its diff.\n\n" +
+				prompts.Fence("diff", prompts.Truncate(diff, w.Cfg.MaxDiffChars))
+		} else {
+			w.Repo.MustGit("checkout", "-q", "-B", p.Branch, ref)
+		}
 	} else {
-		w.Repo.MustGit("checkout", "-q", "-B", w.Plan.Branch, "origin/"+w.Plan.Base)
+		w.auth().MustGit("fetch", "-q", "origin", p.Base)
+		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Base)
 	}
-	prompt, err := prompts.Render(w.Cfg, "ask", w.vars(map[string]string{
-		"question": prompts.Fence("question by @"+w.Plan.Asker, w.Plan.Request)}))
-	if err != nil {
-		panic(err)
-	}
+	prompt := w.render("ask", map[string]string{"change": change,
+		"question": prompts.Fence("question by @"+p.Asker, p.Request)})
 	o, ok := w.call("ask", false, prompt)
 	switch {
 	case !ok && w.result.RateLimited:
@@ -358,11 +418,9 @@ func (w *Worker) ask() {
 }
 
 func (w *Worker) triage() {
+	w.auth().MustGit("fetch", "-q", "origin", w.Plan.Base)
 	w.Repo.MustGit("checkout", "-q", "-B", w.Plan.Branch, "origin/"+w.Plan.Base)
-	prompt, err := prompts.Render(w.Cfg, "triage", w.vars(nil))
-	if err != nil {
-		panic(err)
-	}
+	prompt := w.render("triage", nil)
 	o, ok := w.call("triage", false, prompt)
 	t := &job.Triage{}
 	switch {
@@ -388,13 +446,10 @@ func (w *Worker) checksAndFix(base string) bool {
 	w.result.Checks = w.runChecks()
 	w.result.ChecksGreen = allGreen(w.result.Checks)
 	for pass := 1; !w.result.ChecksGreen && pass <= w.Cfg.FixPasses; pass++ {
-		prompt, err := prompts.Render(w.Cfg, "fix", w.vars(map[string]string{
+		prompt := w.render("fix", map[string]string{
 			"request":  "Make the failing checks below pass without weakening them.",
 			"checks":   prompts.Fence("checks", checksText(w.result.Checks)),
-			"findings": "(none: only the checks)"}))
-		if err != nil {
-			panic(err)
-		}
+			"findings": "(none: only the checks)"})
 		head := w.Repo.MustGit("rev-parse", "HEAD")
 		o, ok := w.call("fix", true, prompt)
 		w.commit(head, fmt.Sprintf("Fix the checks (#%d)", w.Plan.Number))
@@ -416,7 +471,7 @@ func (w *Worker) reviewLoop(base string) {
 	rounds := w.Plan.ReviewRounds
 	var previous []job.Finding
 	for round := 1; round <= rounds; round++ {
-		v, ok := w.review(base, round, rounds, previous)
+		v, ok := w.review(base, "HEAD", round, rounds, previous)
 		if !ok {
 			return
 		}
@@ -433,13 +488,10 @@ func (w *Worker) reviewLoop(base string) {
 			findings = append(findings, job.Finding{Severity: "blocking", Problem: "The repository's checks fail."})
 		}
 		previous = findings
-		prompt, err := prompts.Render(w.Cfg, "fix", w.vars(map[string]string{
+		prompt := w.render("fix", map[string]string{
 			"request":  "Address every blocking finding of the review below.",
 			"findings": prompts.Fence("review", findingsText(findings)),
-			"checks":   prompts.Fence("checks", checksText(w.result.Checks))}))
-		if err != nil {
-			panic(err)
-		}
+			"checks":   prompts.Fence("checks", checksText(w.result.Checks))})
 		head := w.Repo.MustGit("rev-parse", "HEAD")
 		o, ok := w.call("fix", true, prompt)
 		w.commit(head, fmt.Sprintf("Address review round %d (#%d)", round, w.Plan.Number))
@@ -452,23 +504,27 @@ func (w *Worker) reviewLoop(base string) {
 	}
 }
 
-// review is one adversarial review of base..HEAD in a fresh, read-only session.
-func (w *Worker) review(base string, round, rounds int, previous []job.Finding) (*job.Verdict, bool) {
-	stat, _ := w.Repo.Git("diff", "--stat", base+"..HEAD")
-	diff, _ := w.Repo.Git("diff", base+"..HEAD")
+// review is one adversarial review of base..head in a fresh, read-only session.
+func (w *Worker) review(base, head string, round, rounds int, previous []job.Finding) (*job.Verdict, bool) {
+	stat, _ := w.Repo.Git("diff", "--stat", base, head)
+	diff, _ := w.Repo.Git("diff", base, head)
 	earlier := "(none: this is the first review)"
 	if len(previous) > 0 {
 		earlier = prompts.Fence("earlier review", findingsText(previous))
 	}
-	prompt, err := prompts.Render(w.Cfg, "review", w.vars(map[string]string{
-		"round": fmt.Sprint(round), "rounds": fmt.Sprint(rounds), "base_sha": base,
+	where := fmt.Sprintf("The working directory is the branch `%s` with the change committed; it starts from `%s`.",
+		w.Plan.Branch, base)
+	if w.Plan.Untrusted {
+		where = fmt.Sprintf("The change is **not** checked out: it comes from outside this repository or from someone "+
+			"off the trust list, so none of its code runs here. The working directory is the base it starts from (`%s`); "+
+			"read the change from the diff below, and the code around it from the working directory.", base)
+	}
+	prompt := w.render("review", map[string]string{
+		"round": fmt.Sprint(round), "rounds": fmt.Sprint(rounds), "base_sha": base, "where": where,
 		"report":   prompts.Fence("the builder's report", w.result.Report),
 		"checks":   prompts.Fence("checks", checksText(w.result.Checks)),
 		"previous": earlier,
-		"diff":     "```diff\n" + stat + "\n\n" + prompts.Truncate(diff, w.Cfg.MaxDiffChars) + "\n```"}))
-	if err != nil {
-		panic(err)
-	}
+		"diff":     prompts.Fence("the change", "```diff\n"+stat+"\n\n"+prompts.Truncate(diff, w.Cfg.MaxDiffChars)+"\n```")})
 	o, ok := w.call("review", false, prompt)
 	if !ok {
 		return nil, false
@@ -626,6 +682,15 @@ func (w *Worker) redact() {
 	scrub := func(s string) string { return strings.ReplaceAll(s, secret, "[redacted]") }
 	r := w.result
 	r.Report, r.Answer, r.Error = scrub(r.Report), scrub(r.Answer), scrub(r.Error)
+	if r.Triage != nil {
+		r.Triage.Summary = scrub(r.Triage.Summary)
+	}
+	for i := range r.Changed {
+		r.Changed[i] = scrub(r.Changed[i])
+	}
+	for i := range r.Reverted {
+		r.Reverted[i] = scrub(r.Reverted[i])
+	}
 	for i := range r.Checks {
 		r.Checks[i].Output = scrub(r.Checks[i].Output)
 	}
@@ -637,6 +702,7 @@ func (w *Worker) redact() {
 		for i := range r.Verdict.Findings {
 			r.Verdict.Findings[i].Problem = scrub(r.Verdict.Findings[i].Problem)
 			r.Verdict.Findings[i].Fix = scrub(r.Verdict.Findings[i].Fix)
+			r.Verdict.Findings[i].File = scrub(r.Verdict.Findings[i].File)
 		}
 	}
 }

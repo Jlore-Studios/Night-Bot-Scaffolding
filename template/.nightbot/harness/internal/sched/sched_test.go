@@ -49,6 +49,12 @@ func pr(n int, labels ...string) *github.Issue {
 	return i
 }
 
+func botPR(n int, labels ...string) *github.Issue {
+	i := pr(n, labels...)
+	i.User.Login = "bot"
+	return i
+}
+
 var secrets = map[string]bool{"BIG": true, "SMALL": true}
 
 func TestQueue_Order(t *testing.T) {
@@ -61,7 +67,8 @@ func TestQueue_Order(t *testing.T) {
 		issue(4, "bot:build", "priority:high"),
 		issue(3, "bot:build", "human"),
 		issue(2, "bot:build"), // unrated: triage first
-		pr(6, "bot:revise", "bot:pr"),
+		botPR(6, "bot:revise", "bot:pr"),
+		pr(8, "bot:revise", "bot:pr"), // the label alone does not make a pull request the bot's
 		pr(7, "bot:review"),
 	}
 	var got []string

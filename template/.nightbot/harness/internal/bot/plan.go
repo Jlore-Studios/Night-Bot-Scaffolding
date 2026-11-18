@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -68,7 +69,14 @@ func (b *Bot) Plan(opts PlanOptions) (*job.Plan, string, error) {
 		return nil, why, err
 	}
 	if err := b.fill(plan); err != nil {
-		b.release(state.ClaimKey(plan.Number, plan.QueryID), plan.Number)
+		b.release(state.ClaimKey(plan.Number, plan.QueryID), plan.Number, plan.RunID)
+		var refused *skip
+		if errors.As(err, &refused) {
+			// Not an outage: the item cannot be worked, so it leaves the queue with a word why.
+			b.GH.RemoveLabel(plan.Number, refused.label)
+			b.say(plan.Number, refused.why+".")
+			return nil, refused.why, nil
+		}
 		return nil, "", err
 	}
 	if plan.Action != sched.Ask {
@@ -149,15 +157,61 @@ func (b *Bot) fill(p *job.Plan) error {
 			return err
 		}
 		p.Continue = exists
-	case sched.Revise, sched.Review:
+	case sched.Revise:
 		pr, err := b.GH.GetPR(p.Number)
 		if err != nil {
 			return err
 		}
-		p.Branch, p.PR = pr.Head.Ref, pr.Number
+		if why := b.notOurs(pr); why != "" {
+			return &skip{fmt.Sprintf("#%d cannot be revised: %s", p.Number, why), b.Cfg.Label("revise")}
+		}
+		p.Branch, p.PR, p.Head = pr.Head.Ref, pr.Number, pr.Head.SHA
+	case sched.Review:
+		pr, err := b.GH.GetPR(p.Number)
+		if err != nil {
+			return err
+		}
+		p.PR, p.Head, p.Untrusted = pr.Number, pr.Head.SHA, !b.trustedPR(pr)
+		p.Branch = fmt.Sprintf("%sreview-%d", b.Cfg.BranchPrefix, pr.Number) // local only, never pushed
+	case sched.Ask:
+		if p.IsPR {
+			pr, err := b.GH.GetPR(p.Number)
+			if err != nil {
+				return err
+			}
+			p.Head, p.Untrusted = pr.Head.SHA, !b.trustedPR(pr)
+		}
 	}
 	return nil
 }
+
+// notOurs says why the bot may not push to a pull request's branch, or "" when it may: only the
+// bot's own pull requests, from a branch of its own in this repository.
+func (b *Bot) notOurs(pr *github.PR) string {
+	switch ref := pr.Head.Ref; {
+	case !b.isBot(pr.User.Login):
+		return "it is not the bot's own pull request"
+	case !strings.EqualFold(pr.HeadRepo(), b.Cfg.Repo):
+		return "its branch is in another repository"
+	case !strings.HasPrefix(ref, b.Cfg.BranchPrefix) || ref == b.Cfg.DefaultBranch || ref == b.Cfg.StateBranch:
+		return fmt.Sprintf("its branch %q is not one of the bot's (%s…)", ref, b.Cfg.BranchPrefix)
+	}
+	return ""
+}
+
+// trustedPR says whether a pull request's code may run in the model job: the bot's own, or a
+// trusted person's branch in this repository. Any other is reviewed from its diff alone.
+func (b *Bot) trustedPR(pr *github.PR) bool {
+	if !strings.EqualFold(pr.HeadRepo(), b.Cfg.Repo) {
+		return false
+	}
+	return b.isBot(pr.User.Login) || b.Trusted(pr.User.Login, pr.AuthorAssociation)
+}
+
+// skip is an item the planner claimed but must not work, and the queue label that put it there.
+type skip struct{ why, label string }
+
+func (s *skip) Error() string { return s.why }
 
 // thread is an issue's text and its trusted people's comments, each fenced as data.
 func (b *Bot) thread(issue *github.Issue) (string, error) {
@@ -165,9 +219,19 @@ func (b *Bot) thread(issue *github.Issue) (string, error) {
 	if issue.IsPR() {
 		kind = "Pull request"
 	}
+	// The title and the text are the author's, and an author off the trust list can change them
+	// after a trusted person queued the item, so a stranger's text is left out: the person who
+	// queues it says in a comment of their own what to build.
+	author := issue.User.Login
+	body := issue.Body
+	if !b.isBot(author) && !b.Trusted(author, issue.AuthorAssociation) {
+		body = fmt.Sprintf("(Left out: @%s, who wrote this %s, is not on the trust list. The trusted people's comments below say what to do.)",
+			author, strings.ToLower(kind))
+	}
 	var parts []string
-	parts = append(parts, fmt.Sprintf("%s #%d: %s", kind, issue.Number, issue.Title),
-		prompts.Fence(fmt.Sprintf("%s #%d by @%s", strings.ToLower(kind), issue.Number, issue.User.Login), issue.Body))
+	parts = append(parts, fmt.Sprintf("%s #%d", kind, issue.Number),
+		prompts.Fence(fmt.Sprintf("the title of %s #%d", strings.ToLower(kind), issue.Number), issue.Title),
+		prompts.Fence(fmt.Sprintf("%s #%d by @%s", strings.ToLower(kind), issue.Number, author), body))
 	comments, err := b.GH.ListComments(issue.Number)
 	if err != nil {
 		return "", err

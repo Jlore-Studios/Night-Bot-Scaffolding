@@ -29,6 +29,7 @@ type Bot struct {
 	Store   *state.Store
 	Secrets map[string]bool // which provider secrets are set (names only)
 	Now     func() time.Time
+	Sleep   func(time.Duration)
 	Log     io.Writer
 	RunID   int64
 	RunURL  string
@@ -38,7 +39,7 @@ type Bot struct {
 
 // New is a bot over gh, with the run's identity read from the environment.
 func New(cfg *config.Config, gh, actions github.Client) *Bot {
-	b := &Bot{Cfg: cfg, GH: gh, Actions: actions, Now: time.Now, Log: os.Stderr, Workspace: cfg.Root,
+	b := &Bot{Cfg: cfg, GH: gh, Actions: actions, Now: time.Now, Sleep: time.Sleep, Log: os.Stderr, Workspace: cfg.Root,
 		Store: &state.Store{GH: gh, Branch: cfg.StateBranch}, Secrets: map[string]bool{}}
 	if b.Actions == nil {
 		b.Actions = gh
@@ -218,15 +219,22 @@ func (b *Bot) BranchFor(number int, title string) string {
 }
 
 // release drops a run's claim on an item and its live label.
-func (b *Bot) release(key string, number int) {
+// Only the claim of the run given is released (runID 0 matches a claim made outside a run): a
+// late release by an old run must not drop the claim a newer run holds.
+func (b *Bot) release(key string, number int, runID int64) {
+	released := false
 	_, err := b.Store.Update(fmt.Sprintf("release #%d", number), func(s *state.State) error {
-		delete(s.Running, key)
+		released = false
+		if claim := s.Running[key]; claim != nil && claim.RunID == runID {
+			delete(s.Running, key)
+			released = true
+		}
 		return nil
 	})
 	if err != nil {
 		b.logf("release #%d: %v", number, err)
 	}
-	if !strings.HasPrefix(key, "q:") {
+	if released && !strings.HasPrefix(key, "q:") {
 		if err := b.GH.RemoveLabel(number, b.Cfg.Label("building")); err != nil {
 			b.logf("unlabel #%d: %v", number, err)
 		}

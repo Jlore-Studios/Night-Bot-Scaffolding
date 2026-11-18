@@ -276,8 +276,20 @@ var (
 	errNoTime = errors.New("no reset time")
 )
 
-// ResetTime is when a refusal says the limit resets, or the zero time when it does not say.
+// maxPark is the longest a refusal may park a provider: a weekly limit, and a day to spare.
+const maxPark = 8 * 24 * time.Hour
+
+// ResetTime is when a refusal says the limit resets, or the zero time when it does not say (or
+// says something past maxPark, which is no reset time a subscription has).
 func ResetTime(text string, now time.Time, loc *time.Location) time.Time {
+	t := resetTime(text, now, loc)
+	if t.After(now.Add(maxPark)) || t.Before(now) {
+		return time.Time{}
+	}
+	return t
+}
+
+func resetTime(text string, now time.Time, loc *time.Location) time.Time {
 	if m := isoRE.FindStringSubmatch(text); m != nil {
 		if t, err := time.Parse(time.RFC3339, m[1]); err == nil {
 			return t

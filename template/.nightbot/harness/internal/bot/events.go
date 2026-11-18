@@ -31,12 +31,15 @@ type Event struct {
 	Assignee    *github.User  `json:"assignee"`
 	Sender      github.User   `json:"sender"`
 	WorkflowRun *struct {
-		ID           int64  `json:"id"`
-		Name         string `json:"name"`
-		Conclusion   string `json:"conclusion"`
-		HeadBranch   string `json:"head_branch"`
-		HeadSHA      string `json:"head_sha"`
-		HTMLURL      string `json:"html_url"`
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		Conclusion string `json:"conclusion"`
+		HeadBranch string `json:"head_branch"`
+		HeadSHA    string `json:"head_sha"`
+		HTMLURL    string `json:"html_url"`
+		HeadRepo   *struct {
+			FullName string `json:"full_name"`
+		} `json:"head_repository"`
 		PullRequests []struct {
 			Number int `json:"number"`
 		} `json:"pull_requests"`
@@ -66,7 +69,8 @@ func (b *Bot) Handle(name string, ev *Event) error {
 		} else if ev.PullRequest != nil {
 			number, isPR = ev.PullRequest.Number, true
 		}
-		return b.onComment(number, isPR, ev.Comment.ID, ev.Comment.User.Login, ev.Comment.AuthorAssociation, ev.Comment.Body)
+		return b.onComment(number, isPR, ev.Comment.ID, name == "pull_request_review_comment",
+			ev.Comment.User.Login, ev.Comment.AuthorAssociation, ev.Comment.Body)
 	case "pull_request_review":
 		if ev.Review == nil || ev.PullRequest == nil {
 			return nil
@@ -141,7 +145,7 @@ func ParseCommands(body, prefix, botLogin string) []Command {
 }
 
 // onComment answers the commands in a comment or a review's body.
-func (b *Bot) onComment(number int, isPR bool, id int64, author, association, body string) error {
+func (b *Bot) onComment(number int, isPR bool, id int64, reviewComment bool, author, association, body string) error {
 	if b.isBot(author) || strings.Contains(body, Marker) {
 		return nil
 	}
@@ -165,7 +169,7 @@ func (b *Bot) onComment(number int, isPR bool, id int64, author, association, bo
 		return nil
 	}
 	if id > 0 {
-		b.GH.AddReaction(id, "eyes")
+		b.GH.AddReaction(id, "eyes", reviewComment)
 	}
 	var replies []string
 	kick := false
@@ -198,12 +202,12 @@ func (b *Bot) run(c Command, number int, isPR bool, commentID int64, author stri
 		}
 		return b.StatusMarkdown(snap, false), false
 	case "ask":
-		return b.queueQuestion(number, commentID, author, c.Text)
+		return b.queueQuestion(number, isPR, commentID, author, c.Text)
 	case "mention":
 		if isPR && b.isBotPR(number) {
 			return b.queueRevision(number, author, c.Text)
 		}
-		return b.queueQuestion(number, commentID, author, c.Text)
+		return b.queueQuestion(number, isPR, commentID, author, c.Text)
 	case "revise":
 		if !isPR || !b.isBotPR(number) {
 			return "`revise` works on my own pull requests; on an issue, use `" + p + " build`.", false
@@ -299,12 +303,13 @@ func (b *Bot) help() string {
 	}, "\n")
 }
 
+// isBotPR says whether a pull request is the bot's own: its label, and a branch of its own here.
 func (b *Bot) isBotPR(number int) bool {
 	pr, err := b.GH.GetPR(number)
-	return err == nil && hasLabel(pr.Labels, b.Cfg.Label("pr"))
+	return err == nil && hasLabel(pr.Labels, b.Cfg.Label("pr")) && b.notOurs(pr) == ""
 }
 
-func (b *Bot) queueQuestion(number int, commentID int64, author, text string) (string, bool) {
+func (b *Bot) queueQuestion(number int, isPR bool, commentID int64, author, text string) (string, bool) {
 	if strings.TrimSpace(text) == "" {
 		return "What is the question? `" + b.Cfg.CommandPrefix + " ask <question>`", false
 	}
@@ -314,8 +319,8 @@ func (b *Bot) queueQuestion(number int, commentID int64, author, text string) (s
 				return nil
 			}
 		}
-		s.Queries = append(s.Queries, &state.Query{ID: fmt.Sprint(commentID), Number: number, CommentID: commentID,
-			Author: author, Text: text, Created: b.now()})
+		s.Queries = append(s.Queries, &state.Query{ID: fmt.Sprint(commentID), Number: number, IsPR: isPR,
+			CommentID: commentID, Author: author, Text: text, Created: b.now()})
 		return nil
 	})
 	if err != nil {
@@ -463,7 +468,7 @@ func (b *Bot) onReview(ev *Event) error {
 		return nil
 	}
 	if !strings.EqualFold(r.State, "changes_requested") || !hasLabel(pr.Labels, b.Cfg.Label("pr")) {
-		return b.onComment(pr.Number, true, -r.ID, r.User.Login, r.AuthorAssociation, r.Body)
+		return b.onComment(pr.Number, true, -r.ID, false, r.User.Login, r.AuthorAssociation, r.Body)
 	}
 	if !b.Trusted(r.User.Login, r.AuthorAssociation) {
 		return nil
@@ -526,8 +531,9 @@ func (b *Bot) onIssueEvent(ev *Event) error {
 // onCI queues a CI fix when a required workflow fails on the bot's pull request.
 func (b *Bot) onCI(ev *Event) error {
 	run := ev.WorkflowRun
-	if run == nil || run.Name != b.Cfg.CIWorkflow || !strings.HasPrefix(run.HeadBranch, b.Cfg.BranchPrefix) {
-		return nil
+	if run == nil || run.Name != b.Cfg.CIWorkflow || !strings.HasPrefix(run.HeadBranch, b.Cfg.BranchPrefix) ||
+		run.HeadRepo == nil || !strings.EqualFold(run.HeadRepo.FullName, b.Cfg.Repo) {
+		return nil // not CI of the bot's own branch here (a fork's branch of the same name is not)
 	}
 	switch run.Conclusion {
 	case "failure", "timed_out":
@@ -535,7 +541,7 @@ func (b *Bot) onCI(ev *Event) error {
 		return nil
 	}
 	pr, err := b.GH.FindPR(run.HeadBranch)
-	if err != nil || pr == nil || !hasLabel(pr.Labels, b.Cfg.Label("pr")) || hasLabel(pr.Labels, "human") {
+	if err != nil || pr == nil || !hasLabel(pr.Labels, b.Cfg.Label("pr")) || hasLabel(pr.Labels, "human") || b.notOurs(pr) != "" {
 		return err
 	}
 	if pr.Head.SHA != "" && run.HeadSHA != "" && pr.Head.SHA != run.HeadSHA {

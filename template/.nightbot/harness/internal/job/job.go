@@ -14,25 +14,29 @@ import (
 // model. The model job only reads it; deliver trusts the plan job's outputs over anything the
 // model job wrote.
 type Plan struct {
-	Action       string    `json:"action"`
-	Number       int       `json:"number"`
-	Title        string    `json:"title"`
-	IsPR         bool      `json:"is_pr"`
-	Issue        int       `json:"issue,omitempty"` // a pull request's issue
-	Difficulty   string    `json:"difficulty"`
-	Rated        bool      `json:"rated"`
-	Provider     string    `json:"provider"`
-	CLI          string    `json:"cli"`
-	Model        string    `json:"model"`
-	Effort       string    `json:"effort,omitempty"`
-	Tier         string    `json:"tier"`
-	RunsOn       string    `json:"runs_on"`
-	Login        string    `json:"login"`
-	Secret       string    `json:"secret,omitempty"`
-	Base         string    `json:"base"`
-	Branch       string    `json:"branch"`
-	Continue     bool      `json:"continue"` // the branch exists: carry its work on
+	Action     string `json:"action"`
+	Number     int    `json:"number"`
+	Title      string `json:"title"`
+	IsPR       bool   `json:"is_pr"`
+	Issue      int    `json:"issue,omitempty"` // a pull request's issue
+	Difficulty string `json:"difficulty"`
+	Rated      bool   `json:"rated"`
+	Provider   string `json:"provider"`
+	CLI        string `json:"cli"`
+	Model      string `json:"model"`
+	Effort     string `json:"effort,omitempty"`
+	Tier       string `json:"tier"`
+	RunsOn     string `json:"runs_on"`
+	Login      string `json:"login"`
+	Secret     string `json:"secret,omitempty"`
+	Base       string `json:"base"`
+	Branch     string `json:"branch"`
+	Continue   bool   `json:"continue"` // the branch exists: carry its work on
+	// Untrusted is a pull request from another repository or a person off the trust list: it is
+	// reviewed (or asked about) from its diff alone, never checked out, built or run.
+	Untrusted    bool      `json:"untrusted,omitempty"`
 	PR           int       `json:"pr,omitempty"`
+	Head         string    `json:"head,omitempty"`    // a pull request's head when planned: what an audit reviews
 	Thread       string    `json:"thread"`            // the item and its trusted comments
 	Request      string    `json:"request,omitempty"` // what a revision must change, or the question
 	CIRun        int64     `json:"ci_run,omitempty"`

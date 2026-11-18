@@ -263,8 +263,12 @@ func (c *REST) UpdateComment(id int64, body string) error {
 	return err
 }
 
-func (c *REST) AddReaction(commentID int64, content string) error {
-	_, err := c.do(http.MethodPost, c.repo("/issues/comments/%d/reactions", commentID),
+func (c *REST) AddReaction(commentID int64, content string, review bool) error {
+	kind := "issues"
+	if review {
+		kind = "pulls"
+	}
+	_, err := c.do(http.MethodPost, c.repo("/%s/comments/%d/reactions", kind, commentID),
 		map[string]string{"content": content}, nil)
 	return err
 }
@@ -355,10 +359,25 @@ func (c *REST) MarkReady(pr *PR) error {
 		map[string]any{"id": pr.NodeID})
 }
 
-func (c *REST) EnableAutoMerge(pr *PR, method string) error {
-	return c.graphql(`mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { clientMutationId } }`,
-		map[string]any{"id": pr.NodeID, "method": strings.ToUpper(method)})
+func (c *REST) EnableAutoMerge(pr *PR, method, headSHA string) error {
+	return c.graphql(`mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) { clientMutationId } }`,
+		map[string]any{"id": pr.NodeID, "method": strings.ToUpper(method), "head": headSHA})
+}
+
+// DisableAutoMerge turns auto-merge off (an error that it was not on is no error) and converts
+// the pull request back to a draft.
+func (c *REST) DisableAutoMerge(pr *PR) error {
+	err := c.graphql(`mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`,
+		map[string]any{"id": pr.NodeID})
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "not enabled") {
+		return err
+	}
+	if pr.Draft {
+		return nil
+	}
+	return c.graphql(`mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { clientMutationId } }`,
+		map[string]any{"id": pr.NodeID})
 }
 
 // RequiredChecks reads the checks a branch requires from classic branch protection and from

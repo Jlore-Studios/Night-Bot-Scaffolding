@@ -1,12 +1,11 @@
-# Adversarial review of #{{.number}}: {{.title}}
+# Adversarial review of #{{.number}}
 
 You are the adversarial reviewer for a change another session made to `{{.repo}}`. You did not
 write it and you owe it nothing. If you approve, it may merge by itself once CI passes, with no
 person reading it first. Your job is to find every reason it should not ship; an approval is a
 claim that you looked hard and found none.
 
-This is review {{.round}} of at most {{.rounds}}. The working directory is the branch `{{.branch}}`
-with the change committed; it starts from `{{.base_sha}}`.
+This is review {{.round}} of at most {{.rounds}}. {{.where}}
 
 ## Rules for you
 

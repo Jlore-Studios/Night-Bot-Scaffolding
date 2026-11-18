@@ -16,9 +16,14 @@ type Repo struct {
 	Env []string
 }
 
+// safe keeps a checkout's own configuration from running anything inside the harness's git: a
+// model can write .git/hooks and .git/config, and its hooks or fsmonitor would otherwise run with
+// the harness's environment.
+var safe = []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"}
+
 // Git runs git with args and returns its trimmed stdout.
 func (r *Repo) Git(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append(append([]string(nil), safe...), args...)...)
 	cmd.Dir = r.Dir
 	cmd.Env = append(cmd.Environ(), r.Env...)
 	var stdout, stderr bytes.Buffer
@@ -61,31 +66,67 @@ func Lines(out string) []string {
 	return lines
 }
 
-// Changed lists the paths that differ between base and head, renames as both their paths.
+// Changed lists the paths that differ between base and head, renames as both their paths. The
+// names are git's own bytes (-z), never quoted, so a name with an accent or a quote in it matches
+// the patterns it should.
 func (r *Repo) Changed(base, head string) ([]string, error) {
-	out, err := r.Git("diff", "--name-only", "--no-renames", base, head, "--")
+	out, err := r.raw("diff", "--name-only", "-z", "--no-renames", base, head, "--")
 	if err != nil {
 		return nil, err
 	}
-	return Lines(out), nil
+	return nulSplit(out), nil
 }
 
-// Dirty lists the paths the working tree changed since HEAD, tracked or not (ignored files are
-// left out).
+// Staged lists the paths the index changed since rev.
+func (r *Repo) Staged(rev string) ([]string, error) {
+	out, err := r.raw("diff", "--cached", "--name-only", "-z", "--no-renames", rev, "--")
+	if err != nil {
+		return nil, err
+	}
+	return nulSplit(out), nil
+}
+
+// Dirty lists the paths the working tree and the index changed since HEAD, tracked or not
+// (ignored files are left out).
 func (r *Repo) Dirty() ([]string, error) {
-	out, err := r.Git("status", "--porcelain", "--untracked-files=all", "--no-renames")
+	out, err := r.raw("status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
 	if err != nil {
 		return nil, err
 	}
 	var paths []string
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) > 3 {
-			path := line[3:]
-			path = strings.Trim(path, `"`)
-			paths = append(paths, path)
+	for _, entry := range strings.Split(out, "\x00") {
+		if len(entry) > 3 {
+			paths = append(paths, entry[3:])
 		}
 	}
 	return paths, nil
+}
+
+// Literal is a pathspec that means exactly path, with no glob or magic in it.
+func Literal(path string) string { return ":(literal)" + path }
+
+func nulSplit(out string) []string {
+	var paths []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// raw runs git and returns its stdout untrimmed (for -z output).
+func (r *Repo) raw(args ...string) (string, error) {
+	cmd := exec.Command("git", append(append([]string(nil), safe...), args...)...)
+	cmd.Dir = r.Dir
+	cmd.Env = append(cmd.Environ(), r.Env...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %v: %s", strings.Join(redact(args), " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
 }
 
 // Exists says whether a revision exists.

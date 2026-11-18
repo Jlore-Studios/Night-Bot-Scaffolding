@@ -26,10 +26,17 @@ var Token = func() string {
 
 // Deliver reads what the model job left in out and acts on it: comments, labels, the push and
 // the pull request. workStatus is the model job's conclusion as the workflow saw it.
-func (b *Bot) Deliver(p *job.Plan, out, workStatus string) error {
+func (b *Bot) Deliver(p *job.Plan, out, workStatus string) (err error) {
 	key := state.ClaimKey(p.Number, p.QueryID)
 	defer b.Kick()
-	defer b.release(key, p.Number)
+	defer b.release(key, p.Number, p.RunID)
+	defer func() {
+		// A delivery GitHub refused (a push rule, an API error) counts as a failure, so an item
+		// that can never be delivered goes to a person rather than round the queue for ever.
+		if err != nil && p.Action != sched.Ask {
+			b.fail(p.Number, "delivering the run failed: "+err.Error()+b.runLink(p))
+		}
+	}()
 
 	r := &job.Result{}
 	if err := job.Read(filepath.Join(out, "result.json"), r); err != nil {
@@ -160,7 +167,17 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 		b.fail(p.Number, "the model job left no change to deliver")
 		return nil
 	}
-	if err := b.push(p, r, out); err != nil {
+	if p.Action == sched.Revise && p.PR != 0 {
+		// The change on the pull request is about to be one no review has seen: auto-merge goes
+		// off first, and only a new approval of the new head turns it on again.
+		if current, err := b.GH.GetPR(p.PR); err == nil {
+			if err := b.GH.DisableAutoMerge(current); err != nil {
+				return fmt.Errorf("turning auto-merge off before the push: %w", err)
+			}
+		}
+	}
+	head, changed, err := b.push(p, r, out)
+	if err != nil {
 		var refused *refusal
 		if errors.As(err, &refused) {
 			b.fail(p.Number, refused.Error())
@@ -199,7 +216,7 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 		b.GH.RemoveLabel(pr, b.Cfg.Label("revise"))
 		b.say(pr, "Revised:\n\n"+quoteBlock(r.Report)+"\n\n"+reviewText(r)+b.runLink(p))
 	}
-	_, err := b.Store.Update(fmt.Sprintf("delivered #%d", pr), func(s *state.State) error {
+	_, err = b.Store.Update(fmt.Sprintf("delivered #%d", pr), func(s *state.State) error {
 		mem := s.Item(pr)
 		mem.Branch, mem.LastProvider, mem.Notes, mem.CIRun = p.Branch, p.Provider, nil, 0
 		mem.Builders = append(mem.Builders, p.Provider+"/"+p.Model)
@@ -216,7 +233,7 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 	if err != nil {
 		return err
 	}
-	return b.ship(pr, p, r)
+	return b.ship(pr, p, r, head, changed)
 }
 
 func (b *Bot) runLink(p *job.Plan) string {
@@ -258,31 +275,41 @@ type refusal struct{ why string }
 func (r *refusal) Error() string { return r.why }
 
 // push checks the bundle the model job left and pushes it to the item's branch: only a change
-// that grows from the base, touches no forbidden path, and moves the branch forward.
-func (b *Bot) push(p *job.Plan, r *job.Result, out string) error {
+// that grows from the base, touches no forbidden path, and moves one of the bot's own branches
+// forward. It returns the head it pushed and the paths the change touches, both read from the
+// bundle itself, never from what the model job says.
+func (b *Bot) push(p *job.Plan, r *job.Result, out string) (string, []string, error) {
+	if !strings.HasPrefix(p.Branch, b.Cfg.BranchPrefix) || p.Branch == b.Cfg.DefaultBranch || p.Branch == b.Cfg.StateBranch {
+		return "", nil, &refusal{fmt.Sprintf("%q is not one of the bot's branches (%s…), so I pushed nothing", p.Branch, b.Cfg.BranchPrefix)}
+	}
+	head, changed, err := b.pushBundle(p, r, out)
+	return head, changed, err
+}
+
+func (b *Bot) pushBundle(p *job.Plan, r *job.Result, out string) (string, []string, error) {
 	repo := b.repo()
 	bundle := filepath.Join(out, filepath.Base(r.Bundle))
 	incoming := "refs/nightbot/incoming"
 	if _, err := repo.Git("fetch", "-q", "origin", p.Base); err != nil {
-		return err
+		return "", nil, err
 	}
 	if _, err := repo.Git("bundle", "verify", "-q", bundle); err != nil {
-		return &refusal{"the change's bundle does not verify against this repository: " + err.Error()}
+		return "", nil, &refusal{"the change's bundle does not verify against this repository: " + err.Error()}
 	}
 	if _, err := repo.Git("fetch", "-q", "--no-tags", bundle, "+refs/heads/"+p.Branch+":"+incoming); err != nil {
-		return &refusal{"the bundle does not hold the branch " + p.Branch}
+		return "", nil, &refusal{"the bundle does not hold the branch " + p.Branch}
 	}
 	head, err := repo.Git("rev-parse", incoming)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	base, err := repo.Git("merge-base", "origin/"+p.Base, incoming)
 	if err != nil {
-		return &refusal{"the change shares no history with " + p.Base}
+		return "", nil, &refusal{"the change shares no history with " + p.Base}
 	}
 	changed, err := repo.Changed(base, incoming)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	var forbidden []string
 	for _, path := range changed {
@@ -291,32 +318,33 @@ func (b *Bot) push(p *job.Plan, r *job.Result, out string) error {
 		}
 	}
 	if len(forbidden) > 0 {
-		return &refusal{"the change touches forbidden paths, so I pushed nothing: " + strings.Join(forbidden, ", ")}
+		return "", nil, &refusal{"the change touches forbidden paths, so I pushed nothing: " + strings.Join(forbidden, ", ")}
 	}
 	lease := "--force-with-lease=refs/heads/" + p.Branch + ":"
 	if remote, err := repo.Git("ls-remote", "origin", "refs/heads/"+p.Branch); err == nil && remote != "" {
 		sha := strings.Fields(remote)[0]
 		if _, err := repo.Git("fetch", "-q", "origin", sha); err != nil {
-			return err
+			return "", nil, err
 		}
 		if _, err := repo.Git("merge-base", "--is-ancestor", sha, incoming); err != nil {
-			return &refusal{fmt.Sprintf("%s moved while the model worked (it is at %.12s now), so I pushed nothing; it will be worked again", p.Branch, sha)}
+			return "", nil, &refusal{fmt.Sprintf("%s moved while the model worked (it is at %.12s now), so I pushed nothing; it will be worked again", p.Branch, sha)}
 		}
 		lease += sha
 	}
 	if os.Getenv("NIGHTBOT_DRY_RUN") != "" {
 		b.logf("dry run: push %.12s to %s", head, p.Branch)
-		return nil
+		return head, changed, nil
 	}
 	if _, err := repo.Git("push", "-q", lease, "origin", incoming+":refs/heads/"+p.Branch); err != nil {
-		return err
+		return "", nil, err
 	}
 	b.logf("pushed %.12s to %s", head, p.Branch)
-	return nil
+	return head, changed, nil
 }
 
-// ship decides what happens to an approved or unapproved pull request.
-func (b *Bot) ship(pr int, p *job.Plan, r *job.Result) error {
+// ship decides what happens to an approved or unapproved pull request. head is the commit the
+// approval is for, and changed the paths it touches, both from the harness's own reading of git.
+func (b *Bot) ship(pr int, p *job.Plan, r *job.Result, head string, changed []string) error {
 	current, err := b.GH.GetPR(pr)
 	if err != nil {
 		return err
@@ -343,14 +371,17 @@ func (b *Bot) ship(pr int, p *job.Plan, r *job.Result) error {
 		b.logf("ready #%d: %v", pr, err)
 	}
 	b.GH.RemoveLabel(pr, b.Cfg.Label("review"))
+	current = b.waitForHead(current, head)
+	if current.Head.SHA != "" && current.Head.SHA != head {
+		b.GH.AddLabels(pr, b.Cfg.Label("review"))
+		b.say(pr, fmt.Sprintf("The review approved %.12s, but the pull request's head is %.12s now, so it gets another review.", head, current.Head.SHA))
+		return nil
+	}
 	var touched []string
-	for _, path := range r.Changed {
+	for _, path := range changed {
 		if config.MatchAny(b.Cfg.ReviewPaths, path) {
 			touched = append(touched, path)
 		}
-	}
-	if len(touched) == 0 && p.Action == sched.Review {
-		touched = b.reviewPathsOf(current)
 	}
 	approval := fmt.Sprintf("Approved by an adversarial review (%s on %s, %s tier).", p.Model, p.Provider, p.Tier)
 	switch {
@@ -372,7 +403,7 @@ func (b *Bot) ship(pr int, p *job.Plan, r *job.Result) error {
 			b.say(pr, fmt.Sprintf("%s%s I left auto-merge off: %s.", b.operator(), approval, why))
 			return nil
 		}
-		if err := b.GH.EnableAutoMerge(current, b.Cfg.MergeMethod); err != nil {
+		if err := b.GH.EnableAutoMerge(current, b.Cfg.MergeMethod, head); err != nil {
 			b.GH.AddLabels(pr, "ready for merge")
 			b.say(pr, fmt.Sprintf("%s%s Auto-merge would not turn on: %v", b.operator(), approval, err))
 			return nil
@@ -382,27 +413,35 @@ func (b *Bot) ship(pr int, p *job.Plan, r *job.Result) error {
 	return nil
 }
 
-// reviewPathsOf is the review-only paths a pull request touches, for an audit, which has no diff
-// of its own: read from the branch against the base in the workspace.
-func (b *Bot) reviewPathsOf(pr *github.PR) []string {
+// waitForHead gives GitHub a few seconds to show a push on the pull request, which it does
+// asynchronously, before ship compares the head with the one that was approved.
+func (b *Bot) waitForHead(pr *github.PR, head string) *github.PR {
+	for try := 0; try < 6 && pr.Head.SHA != "" && pr.Head.SHA != head; try++ {
+		b.Sleep(2 * time.Second)
+		if fresh, err := b.GH.GetPR(pr.Number); err == nil {
+			pr = fresh
+		}
+	}
+	return pr
+}
+
+// changedOf is the paths a pull request's head touches, for an audit, which has no bundle of
+// its own: read from git in the workspace.
+func (b *Bot) changedOf(pr *github.PR, head string) ([]string, error) {
 	repo := b.repo()
-	baseRef, headRef := "refs/remotes/origin/"+pr.Base.Ref, "refs/remotes/origin/"+pr.Head.Ref
+	baseRef, headRef := "refs/remotes/origin/"+pr.Base.Ref, fmt.Sprintf("refs/remotes/origin/pr-%d", pr.Number)
 	if _, err := repo.Git("fetch", "-q", "origin", "+refs/heads/"+pr.Base.Ref+":"+baseRef,
-		"+refs/heads/"+pr.Head.Ref+":"+headRef); err != nil {
-		return []string{"(could not read the change: " + err.Error() + ")"}
+		fmt.Sprintf("+refs/pull/%d/head:%s", pr.Number, headRef)); err != nil {
+		return nil, err
+	}
+	if got, err := repo.Git("rev-parse", headRef); err != nil || got != head {
+		return nil, fmt.Errorf("#%d's head is %.12s, not the %.12s that was reviewed", pr.Number, got, head)
 	}
 	base, err := repo.Git("merge-base", baseRef, headRef)
 	if err != nil {
-		base = baseRef
+		return nil, err
 	}
-	changed, _ := repo.Changed(base, headRef)
-	var touched []string
-	for _, path := range changed {
-		if config.MatchAny(b.Cfg.ReviewPaths, path) {
-			touched = append(touched, path)
-		}
-	}
-	return touched
+	return repo.Changed(base, headRef)
 }
 
 // unprotected is the required_checks the default branch does not require, or an error when its
@@ -444,11 +483,17 @@ func (b *Bot) deliverAudit(p *job.Plan, r *job.Result) error {
 	if err != nil {
 		return err
 	}
-	if !hasLabel(pr.Labels, b.Cfg.Label("pr")) {
+	if !hasLabel(pr.Labels, b.Cfg.Label("pr")) || b.notOurs(pr) != "" || p.Untrusted {
 		return nil // a person's pull request: the review is all the bot does
 	}
 	if r.Approved {
-		return b.ship(p.Number, p, r)
+		changed, err := b.changedOf(pr, p.Head)
+		if err != nil {
+			b.GH.AddLabels(p.Number, b.Cfg.Label("review"))
+			b.say(p.Number, "The audit approved, but I could not hold it to the pull request's head: "+err.Error()+". It gets another review.")
+			return nil
+		}
+		return b.ship(p.Number, p, r, p.Head, changed)
 	}
 	_, err = b.Store.Update(fmt.Sprintf("audit of #%d", p.Number), func(s *state.State) error {
 		mem := s.Item(p.Number)

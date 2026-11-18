@@ -21,29 +21,36 @@ func (b *Bot) Sweep() error {
 	if err != nil {
 		return err
 	}
-	budget := time.Duration(b.Cfg.JobBudgetMinutes+60) * time.Minute
+	// A claim whose run's status cannot be read is held at most this long; one whose run is
+	// still going is held however long the run takes.
+	budget := time.Duration(b.Cfg.JobBudgetMinutes+180) * time.Minute
 	for key, claim := range st.Running {
-		lost := ""
+		lost, count := "", true
+		readable := false
 		if claim.RunID != 0 {
 			run, err := b.Actions.GetRun(claim.RunID)
 			switch {
 			case errors.Is(err, github.ErrNotFound):
-				lost = "its run is gone"
+				lost, readable = "its run is gone", true
 			case err != nil:
 				b.logf("sweep: run %d: %v", claim.RunID, err)
 			case run.Status == "completed":
+				readable = true
 				lost = fmt.Sprintf("its run ended (%s) without delivering", run.Conclusion)
+				count = run.Conclusion != "cancelled" // a person or /nightbot stop cancelled it
+			default:
+				readable = true // queued or going: it is not lost
 			}
 		}
-		if lost == "" && b.now().Sub(claim.Started) > budget {
-			lost = fmt.Sprintf("it held the item for over %s", budget)
+		if !readable && b.now().Sub(claim.Started) > budget {
+			lost = fmt.Sprintf("it held the item for over %s and its run cannot be read", budget)
 		}
 		if lost == "" {
 			continue
 		}
 		b.logf("sweep: releasing #%d (%s on %s): %s", claim.Number, claim.Action, claim.Provider, lost)
-		b.release(key, claim.Number)
-		if claim.QueryID == "" {
+		b.release(key, claim.Number, claim.RunID)
+		if claim.QueryID == "" && count {
 			b.fail(claim.Number, "a run was lost: "+lost)
 		}
 	}

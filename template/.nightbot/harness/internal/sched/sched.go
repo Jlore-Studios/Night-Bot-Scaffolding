@@ -92,7 +92,8 @@ func Queue(cfg *config.Config, st *state.State, issues []*github.Issue) []*Item 
 			if !item.Rated && cfg.Triage && (mem == nil || !mem.Triaged) {
 				item.Action = Triage
 			}
-		case issue.IsPR() && issue.HasLabel(cfg.Label("revise")) && issue.HasLabel(cfg.Label("pr")):
+		case issue.IsPR() && issue.HasLabel(cfg.Label("revise")) && issue.HasLabel(cfg.Label("pr")) &&
+			strings.EqualFold(issue.User.Login, cfg.BotLogin):
 			item.Action = Revise
 		case issue.IsPR() && issue.HasLabel(cfg.Label("review")):
 			item.Action = Review
@@ -108,7 +109,7 @@ func Queue(cfg *config.Config, st *state.State, issues []*github.Issue) []*Item 
 		if _, running := st.Running[state.ClaimKey(q.Number, q.ID)]; running {
 			continue
 		}
-		queue = append(queue, &Item{Number: q.Number, Title: "question from @" + q.Author, Action: Ask,
+		queue = append(queue, &Item{Number: q.Number, IsPR: q.IsPR, Title: "question from @" + q.Author, Action: Ask,
 			Difficulty: "medium", Rated: true, Priority: 0, Created: q.Created, Query: q})
 	}
 	sort.SliceStable(queue, func(i, j int) bool {

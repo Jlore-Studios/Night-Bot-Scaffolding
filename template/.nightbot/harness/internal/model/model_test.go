@@ -122,6 +122,8 @@ func TestResetTime(t *testing.T) {
 		"resets 3pm (America/New_York)":       time.Date(2026, 3, 1, 20, 0, 0, 0, time.UTC),
 		"usage limit reached, resets at 11am": time.Date(2026, 3, 2, 11, 0, 0, 0, time.UTC),
 		"quota exceeded":                      {},
+		"resets at 2031-01-01T00:00:00Z":      {},
+		"try again in 9000 hours":             {},
 	}
 	for text, want := range cases {
 		if got := ResetTime(text, now, time.UTC); !got.Equal(want) {

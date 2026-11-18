@@ -69,6 +69,7 @@ type Item struct {
 type Query struct {
 	ID        string    `json:"id"`
 	Number    int       `json:"number"`
+	IsPR      bool      `json:"is_pr,omitempty"`
 	CommentID int64     `json:"comment_id"`
 	Author    string    `json:"author"`
 	Text      string    `json:"text"`

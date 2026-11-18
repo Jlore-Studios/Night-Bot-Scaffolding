@@ -20,15 +20,17 @@ It was installed from [Night-Bot-Scaffolding](https://github.com/Jlore-Studios/N
 ## Giving it work
 
 - **Build an issue:** label it `bot:build`, assign it to the bot, or comment `/nightbot build`.
-  Add `--force` to start a run now, outside the providers' hours. Read an issue from a stranger
-  before you queue it: its text goes to the model.
+  Add `--force` to start a run now, outside the providers' hours. An issue a stranger (someone
+  off the trust list) wrote has its text left out, since they could edit it after you queue it:
+  say in a comment of your own what to build.
 - **Ask a question:** comment `/nightbot ask <question>` or mention the bot (`@<bot> how does X
   work?`) on any issue or pull request. Questions go to a **weak** model first: they are cheap and
   someone is waiting.
 - **Change its pull request:** request changes in a review, or comment
   `/nightbot revise <what to change>` (or mention the bot) on it. Red CI on its pull request
   queues a fix by itself.
-- **Review any pull request:** `/nightbot review`; on a person's pull request it only comments.
+- **Review any pull request:** `/nightbot review`; on a person's pull request it only comments,
+  and one from a fork or a stranger is reviewed from its diff alone, its code never run.
 
 How hard an item is decides which models may build it: label it `difficulty:medium` or
 `difficulty:hard`, or leave it and a weak model triages it first (`"triage": true`). A hard item

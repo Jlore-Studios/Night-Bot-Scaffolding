@@ -24,6 +24,7 @@ type Fake struct {
 	Labels     map[string]bool
 	Required   []string
 	Login      string
+	RepoName   string
 	Reactions  map[int64][]string
 	Dispatched []map[string]string
 	AutoMerge  map[int]string
@@ -48,7 +49,7 @@ func NewFake() *Fake {
 		Reviews: map[int][]*Review{}, Runs: map[int64]*Run{}, Jobs: map[int64][]*Job{},
 		Logs: map[int64]string{}, Labels: map[string]bool{}, Reactions: map[int64][]string{},
 		AutoMerge: map[int]string{}, Repo: map[string]any{}, Protected: map[string][]string{},
-		Login: "nightbot", nextID: 1000, nextNumber: 1}
+		Login: "nightbot", RepoName: "o/r", nextID: 1000, nextNumber: 1}
 }
 
 // AddIssue files an issue, or a pull request with pr set, and returns its number.
@@ -229,7 +230,7 @@ func (f *Fake) UpdateComment(id int64, body string) error {
 	return fmt.Errorf("%w: comment %d", ErrNotFound, id)
 }
 
-func (f *Fake) AddReaction(commentID int64, content string) error {
+func (f *Fake) AddReaction(commentID int64, content string, review bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Reactions[commentID] = append(f.Reactions[commentID], content)
@@ -314,6 +315,9 @@ func (f *Fake) CreatePR(head, base, title, body string, draft bool) (*PR, error)
 	pr := &PR{Number: n, NodeID: fmt.Sprint("PR_", n), Title: title, Body: body, State: "open",
 		Draft: draft, User: User{Login: f.Login}, HTMLURL: fmt.Sprintf("https://github.com/o/r/pull/%d", n)}
 	pr.Head.Ref = head
+	pr.Head.Repo = &struct {
+		FullName string `json:"full_name"`
+	}{FullName: f.RepoName}
 	pr.Base.Ref = base
 	f.PRs[n] = pr
 	copied := *pr
@@ -351,11 +355,33 @@ func (f *Fake) MarkReady(pr *PR) error {
 	return nil
 }
 
-func (f *Fake) EnableAutoMerge(pr *PR, method string) error {
+func (f *Fake) EnableAutoMerge(pr *PR, method, headSHA string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.AutoMerge[pr.Number] = method
+	if p := f.PRs[pr.Number]; p != nil && p.Head.SHA != "" && headSHA != p.Head.SHA {
+		return fmt.Errorf("head is %s, not the expected %s", p.Head.SHA, headSHA)
+	}
+	f.AutoMerge[pr.Number] = method + "@" + headSHA
 	return nil
+}
+
+func (f *Fake) DisableAutoMerge(pr *PR) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.AutoMerge, pr.Number)
+	if p := f.PRs[pr.Number]; p != nil {
+		p.Draft = true
+	}
+	return nil
+}
+
+// SetHead records a pull request's head, as GitHub would after a push.
+func (f *Fake) SetHead(number int, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p := f.PRs[number]; p != nil {
+		p.Head.SHA = sha
+	}
 }
 
 func (f *Fake) RequiredChecks(branch string) ([]string, error) {

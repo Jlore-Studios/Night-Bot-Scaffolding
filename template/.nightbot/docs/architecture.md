@@ -55,8 +55,10 @@ flowchart LR
      logs); **ask** and **triage** are single read-only calls on a weak model.
    - It writes `result.json` and, when there is a change, `change.bundle`.
 3. **Deliver.** Back on GitHub's runner with the bot's token: it verifies the bundle against the
-   repository, refuses any change to a forbidden path or one that does not move the branch
-   forward, pushes, and opens (or updates) the pull request. Then it ships, queues an audit, or
+   repository, refuses any change to a forbidden path, to a branch not the bot's own, or one that
+   does not move the branch forward, turns auto-merge off on a pull request it is about to change,
+   pushes, and opens (or updates) the pull request. Auto-merge goes on only for the commit the
+   review approved. Then it ships, queues an audit, or
    hands the item to a person ([README](../README.md#what-happens-to-a-change)). It books the run's
    model minutes, parks a provider that was refused for usage limits until the reset time the
    refusal named, releases the claim and starts the next run when a lane is free.

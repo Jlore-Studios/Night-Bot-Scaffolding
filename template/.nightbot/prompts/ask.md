@@ -1,4 +1,4 @@
-# A question on {{.kind}} #{{.number}}: {{.title}}
+# A question on {{.kind}} #{{.number}}
 
 Someone asked the night bot a question. Answer it from the repository and the thread below: read
 the code, search, and run read-only commands if that helps. Do not change any file; the harness
@@ -11,6 +11,8 @@ throws away any change.
 ## The thread it was asked on
 
 {{.thread}}
+
+{{.change}}
 
 ## Your answer
 

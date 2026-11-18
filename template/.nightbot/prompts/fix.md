@@ -1,4 +1,4 @@
-# Revise #{{.number}}: {{.title}}
+# Revise #{{.number}}
 
 You are changing the work on the branch `{{.branch}}` (it starts from `{{.base}}`; see
 `git log {{.base}}..HEAD` and `git diff {{.base}}...HEAD` for what is there). Its difficulty is

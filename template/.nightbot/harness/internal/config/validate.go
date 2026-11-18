@@ -54,7 +54,7 @@ func (c *Config) Validate() error {
 			add("path pattern %q: %v", pattern, err)
 		}
 	}
-	for _, must := range []string{Dir + "/x", ".github/workflows/x"} {
+	for _, must := range []string{Dir + "/x", ".github/x", ".github/actions/nightbot/action.yml"} {
 		if !MatchAny(c.ForbiddenPaths, must) {
 			add("forbidden_paths must cover %s/ (the bot may not change its own rules)", filepath.Dir(must))
 		}
