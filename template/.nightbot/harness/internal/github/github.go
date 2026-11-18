@@ -98,6 +98,15 @@ type PR struct {
 		Ref string `json:"ref"`
 	} `json:"base"`
 	Labels []Label `json:"labels"`
+	// MergeableState is GitHub's word on merging it: "dirty" means it conflicts with its base.
+	// GitHub works it out lazily, so it may be "unknown" the first time it is asked.
+	MergeableState string `json:"mergeable_state"`
+}
+
+// Protection is what the default branch requires before anything merges into it.
+type Protection struct {
+	Checks     []string // required status checks, from branch protection and rulesets
+	MergeQueue bool     // a ruleset sends merges through a merge queue
 }
 
 // Review is a pull request review.
@@ -159,13 +168,16 @@ type Client interface {
 	ListReviews(number int) ([]*Review, error)
 	CreateReview(number int, body string) error
 	MarkReady(pr *PR) error
-	// EnableAutoMerge merges the pull request once its checks pass, but only while its head is
-	// still headSHA: a push after the approval turns it off.
+	// EnableAutoMerge merges the pull request once its checks pass (on a branch with a merge
+	// queue: adds it to the queue), but only while its head is still headSHA: a push after the
+	// approval turns it off. An empty method leaves the merge method to the branch's rules.
 	EnableAutoMerge(pr *PR, method, headSHA string) error
 	// DisableAutoMerge turns auto-merge off and makes the pull request a draft again.
 	DisableAutoMerge(pr *PR) error
 
-	RequiredChecks(branch string) ([]string, error)
+	Protection(branch string) (*Protection, error)
+	// PutRuleset creates or updates (by name) a repository ruleset.
+	PutRuleset(name string, ruleset map[string]any) error
 	DispatchWorkflow(file, ref string, inputs map[string]string) error
 	ListRuns(file, status string) ([]*Run, error)
 	GetRun(id int64) (*Run, error)

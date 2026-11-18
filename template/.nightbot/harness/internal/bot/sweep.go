@@ -73,11 +73,42 @@ func (b *Bot) Sweep() error {
 			return nil
 		})
 	}
+	b.mergeConflicted(st)
 	if _, err := b.Store.Update("prune", func(s *state.State) error { s.Prune(b.now()); return nil }); err != nil {
 		b.logf("sweep: prune: %v", err)
 	}
 	b.Kick()
 	return b.UpdateStatus()
+}
+
+// mergeConflicted queues a merge of the default branch into each of the bot's pull requests
+// that conflicts with it: such a pull request can never merge, nor join a merge queue.
+func (b *Bot) mergeConflicted(st *state.State) {
+	open, err := b.GH.ListIssues(b.Cfg.Label("pr"), "open")
+	if err != nil {
+		b.logf("sweep: list the bot's pull requests: %v", err)
+		return
+	}
+	for _, issue := range open {
+		if issue.HasLabel("human") || issue.HasLabel(b.Cfg.Label("revise")) || st.Running[state.Key(issue.Number)] != nil {
+			continue
+		}
+		pr, err := b.GH.GetPR(issue.Number)
+		if err != nil || pr.MergeableState != "dirty" || b.notOurs(pr) != "" {
+			continue
+		}
+		b.Store.Update(fmt.Sprintf("#%d conflicts", pr.Number), func(s *state.State) error {
+			mem := s.Item(pr.Number)
+			if !mem.MergeMain {
+				mem.MergeMain = true
+				mem.Notes = append(mem.Notes, fmt.Sprintf("It conflicts with the newest %s: the harness merges %s in, and the conflicts are yours to resolve.",
+					b.Cfg.DefaultBranch, b.Cfg.DefaultBranch))
+			}
+			return nil
+		})
+		b.GH.AddLabels(pr.Number, b.Cfg.Label("revise"))
+		b.say(pr.Number, fmt.Sprintf("This conflicts with %s; queued a revision that merges it in.", b.Cfg.DefaultBranch))
+	}
 }
 
 // UpdateStatus rewrites the status issue, opening it the first time.
@@ -213,7 +244,8 @@ func minutes(used float64, cap int) string {
 func escape(s string) string { return strings.ReplaceAll(s, "|", "\\|") }
 
 // Setup creates the labels and the state branch, and with repoSettings allows auto-merge,
-// deletes merged branches and protects the default branch with the required checks.
+// deletes merged branches and protects the default branch with the required checks: with
+// merge_queue, through a ruleset that also sends every merge through a merge queue.
 func (b *Bot) Setup(repoSettings bool) error {
 	for _, l := range b.Labels() {
 		if err := b.GH.EnsureLabel(l[0], l[1], l[2]); err != nil {
@@ -235,12 +267,48 @@ func (b *Bot) Setup(repoSettings bool) error {
 	if err := b.GH.UpdateRepo(map[string]any{"allow_auto_merge": true, "delete_branch_on_merge": true}); err != nil {
 		return fmt.Errorf("repository settings: %w", err)
 	}
+	if b.Cfg.MergeQueue {
+		if err := b.GH.PutRuleset(RulesetName, b.Ruleset()); err != nil {
+			return fmt.Errorf("the ruleset with the merge queue (merge queues need a repository an organization owns): %w", err)
+		}
+		return nil
+	}
 	if len(b.Cfg.RequiredChecks) > 0 {
 		if err := b.GH.ProtectBranch(b.Cfg.DefaultBranch, b.Cfg.RequiredChecks); err != nil {
 			return fmt.Errorf("branch protection: %w", err)
 		}
 	}
 	return nil
+}
+
+// RulesetName is the ruleset setup writes for the default branch.
+const RulesetName = "nightbot: default branch"
+
+// Ruleset is the default branch's ruleset with merge_queue: the required checks, and a merge
+// queue that tests each pull request on top of the newest default branch and the ones ahead of it.
+func (b *Bot) Ruleset() map[string]any {
+	var checks []map[string]string
+	for _, name := range b.Cfg.RequiredChecks {
+		checks = append(checks, map[string]string{"context": name})
+	}
+	rules := []map[string]any{{"type": "merge_queue", "parameters": map[string]any{
+		"merge_method":                      strings.ToUpper(b.Cfg.MergeMethod),
+		"grouping_strategy":                 "ALLGREEN",
+		"max_entries_to_build":              5,
+		"min_entries_to_merge":              1,
+		"max_entries_to_merge":              5,
+		"min_entries_to_merge_wait_minutes": 1,
+		"check_response_timeout_minutes":    60,
+	}}}
+	if len(checks) > 0 {
+		rules = append(rules, map[string]any{"type": "required_status_checks", "parameters": map[string]any{
+			"strict_required_status_checks_policy": false,
+			"required_status_checks":               checks,
+		}})
+	}
+	return map[string]any{"target": "branch", "enforcement": "active",
+		"conditions": map[string]any{"ref_name": map[string]any{"include": []string{"~DEFAULT_BRANCH"}, "exclude": []string{}}},
+		"rules":      rules}
 }
 
 // Doctor says what is still missing, one line a check.
@@ -260,11 +328,18 @@ func (b *Bot) Doctor() []string {
 	}
 	exists, err := b.GH.BranchExists(b.Cfg.StateBranch)
 	ok(err == nil && exists, "the state branch "+b.Cfg.StateBranch+" exists (nightbot setup makes it)")
-	required, err := b.GH.RequiredChecks(b.Cfg.DefaultBranch)
-	ok(err == nil && len(required) > 0, fmt.Sprintf("%s requires checks before a merge: %v", b.Cfg.DefaultBranch, required))
+	protection, err := b.GH.Protection(b.Cfg.DefaultBranch)
+	if err != nil {
+		protection = &github.Protection{}
+	}
+	ok(err == nil && len(protection.Checks) > 0, fmt.Sprintf("%s requires checks before a merge: %v", b.Cfg.DefaultBranch, protection.Checks))
 	if b.Cfg.AutoMerge {
-		missing, err := b.unprotected()
+		missing, _, err := b.unprotected()
 		ok(err == nil && len(missing) == 0, fmt.Sprintf("auto-merge can turn on (required_checks %v all required)", b.Cfg.RequiredChecks))
+	}
+	if b.Cfg.MergeQueue || protection.MergeQueue {
+		ok(protection.MergeQueue, b.Cfg.DefaultBranch+" merges through a merge queue (setup --repo-settings writes the ruleset)")
+		ok(b.Cfg.CIRunsInMergeQueue(), fmt.Sprintf("the %q workflow runs on merge_group, or the queue waits for its checks for ever", b.Cfg.CIWorkflow))
 	}
 	any := false
 	for _, p := range b.Cfg.Providers.Ordered() {

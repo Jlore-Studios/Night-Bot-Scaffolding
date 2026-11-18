@@ -91,6 +91,27 @@ The 👀 reaction means the bot read your command.
 
 An item that fails `max_failures` times is handed to a person (`human`), with the reason.
 
+## The merge queue
+
+With a merge queue, every pull request is tested again on top of the newest default branch and
+the pull requests queued ahead of it before it merges, so two changes that pass alone but break
+together never both land. The bot works with one:
+
+- **Turn it on** with `"merge_queue": true` in `config.json` (or `install.sh --merge-queue`), then
+  `nightbot setup --repo-settings`: it writes the ruleset **nightbot: default branch**, which
+  requires your `required_checks` and sends every merge through the queue. Merge queues need a
+  repository an organization owns (public, or private on GitHub Enterprise Cloud).
+- **Your CI must run on `merge_group`**: add `merge_group:` to its `on:`, or the queue waits for
+  its checks until it times out. `nightbot doctor` checks.
+- **An approved change joins the queue** through auto-merge, pinned to the commit the review
+  approved; the queue's own rule sets the merge method.
+- **When it fails in the queue**, GitHub takes it out, and the bot queues a revision that merges
+  the newest default branch into the pull request first (a real merge commit; the model resolves
+  any conflicts), then fixes what CI says, has it reviewed again, and puts it back in the queue.
+- **A pull request that conflicts with the default branch** gets the same merge: the sweep looks
+  every ten minutes. The bot never merges the default branch in otherwise: the queue tests every
+  pull request on the newest one anyway, and each merge would start its CI again.
+
 ## Stopping it
 
 | To stop | Do |
@@ -135,6 +156,7 @@ A run that is going finishes its current step; `stop` cancels it outright.
 | a command got no 👀 | the `nightbot-events` run for that comment: are you on `trust.txt`? did the workflow's `if` filter skip it? |
 | an item never starts | `/nightbot status`: the queue says what each item waits on (a provider's hours, caps, a missing secret, no free lane) |
 | a run failed | the `nightbot-run` run linked from the bot's comment; its `work` artifact holds `result.json` and the change's bundle |
+| a pull request sits in the merge queue and never merges | your CI must run on `merge_group`; `nightbot doctor` says whether it does |
 | a provider is "parked" | its subscription refused for usage limits; it starts again at the reset time it gave (or after `park_minutes`) |
 | no auto-merge | the bot's comment says why: no required checks on the default branch, a review-only path, or `auto_merge` off |
 | the state looks wrong | the `_nightbot-state` branch's `state.json`; editing it by hand is safe while no run is going |

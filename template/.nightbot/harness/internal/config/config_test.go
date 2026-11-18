@@ -115,3 +115,24 @@ func TestSeatFor_TakesTheWeakestThatFits(t *testing.T) {
 		t.Error("a medium model should answer queries when no weak one is there")
 	}
 }
+
+func TestCIRunsInMergeQueue(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".github", "workflows"), 0o755)
+	write := func(text string) {
+		os.WriteFile(filepath.Join(root, ".github", "workflows", "ci.yml"), []byte(text), 0o644)
+	}
+	cfg := &Config{Root: root, CIWorkflow: "CI"}
+	write("name: CI\non:\n  pull_request:\n")
+	if cfg.CIRunsInMergeQueue() {
+		t.Error("a CI without merge_group")
+	}
+	write("name: \"CI\"\non:\n  pull_request:\n  merge_group:\n")
+	if !cfg.CIRunsInMergeQueue() {
+		t.Error("a CI with merge_group")
+	}
+	cfg.CIWorkflow = "Build"
+	if cfg.CIRunsInMergeQueue() {
+		t.Error("no workflow is named Build")
+	}
+}

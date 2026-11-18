@@ -115,6 +115,7 @@ func (b *Bot) planFor(st *state.State, as *sched.Assignment) *job.Plan {
 		if it.Action == sched.Revise {
 			p.Request = strings.Join(mem.Notes, "\n\n")
 			p.CIRun = mem.CIRun
+			p.MergeBase = mem.MergeMain
 		}
 	}
 	switch it.Action {

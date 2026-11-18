@@ -33,6 +33,7 @@ type Config struct {
 	CIWorkflow         string         `json:"ci_workflow"`
 	RequiredChecks     []string       `json:"required_checks"`
 	AutoMerge          bool           `json:"auto_merge"`
+	MergeQueue         bool           `json:"merge_queue"`
 	MergeMethod        string         `json:"merge_method"`
 	Checks             []Check        `json:"checks"`
 	FixPasses          int            `json:"fix_passes"`

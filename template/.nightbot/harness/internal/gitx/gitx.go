@@ -102,6 +102,15 @@ func (r *Repo) Dirty() ([]string, error) {
 	return paths, nil
 }
 
+// Unmerged lists the paths a merge left in conflict.
+func (r *Repo) Unmerged() ([]string, error) {
+	out, err := r.raw("diff", "--name-only", "-z", "--diff-filter=U")
+	if err != nil {
+		return nil, err
+	}
+	return nulSplit(out), nil
+}
+
 // Literal is a pathspec that means exactly path, with no glob or magic in it.
 func Literal(path string) string { return ":(literal)" + path }
 

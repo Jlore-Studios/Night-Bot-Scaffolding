@@ -93,5 +93,7 @@ run never holds an item for good. Editing the file by hand is safe while no run 
 | the issue assigned to the bot | `bot:build` |
 | a trusted person requests changes on the bot's pull request | a revision with the review's text |
 | `ci_workflow` fails on the bot's pull request's head | a revision with the failed jobs' logs, up to `max_ci_fixes` |
+| `ci_workflow` fails on its entry in the merge queue (`gh-readonly-queue/…`) | a revision that merges the newest default branch in first, then fixes what failed |
+| (the sweep) the bot's pull request conflicts with the default branch | a revision that merges the default branch in, the model resolving the conflicts |
 | the bot's pull request closes | the item's memory cleared; merged ones go in the history |
 | the schedule | the sweep |

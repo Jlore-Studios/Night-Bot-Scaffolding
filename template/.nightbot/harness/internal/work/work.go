@@ -324,6 +324,20 @@ func (w *Worker) build() {
 
 func (w *Worker) revise() {
 	base := w.checkout(true)
+	if w.Plan.MergeBase {
+		merged, err := w.mergeBase()
+		if err != nil {
+			if !w.result.RateLimited {
+				w.result.Error = err.Error()
+				w.finish(base, job.Failed)
+				return
+			}
+			w.finish(base, "")
+			return
+		}
+		base = merged
+		w.result.Base = merged
+	}
 	request := w.Plan.Request
 	if logs := w.ciLogs(); logs != "" {
 		request += "\n\n## The failing CI jobs (the end of each log)\n\n" + logs
@@ -344,6 +358,67 @@ func (w *Worker) revise() {
 		w.reviewLoop(base)
 	}
 	w.finish(base, "")
+}
+
+// mergeBase merges the newest base branch into the item's branch as a merge commit of its own,
+// so a change the merge queue or a conflict sent back is fixed on top of what it will merge into.
+// A conflict goes to the model to resolve; a forbidden path always takes the base's side, since
+// the branch never changes one. It returns the new base the change is measured from.
+func (w *Worker) mergeBase() (string, error) {
+	p := w.Plan
+	onto := "origin/" + p.Base
+	message := fmt.Sprintf("Merge %s into %s", p.Base, p.Branch)
+	if _, err := w.Repo.Git("merge", "--no-ff", "--no-edit", "-m", message, onto); err != nil {
+		conflicted, _ := w.Repo.Unmerged()
+		if len(conflicted) == 0 {
+			w.Repo.Git("merge", "--abort")
+			return "", fmt.Errorf("merging %s failed: %v", onto, err)
+		}
+		prompt := w.render("fix", map[string]string{
+			"request": fmt.Sprintf("Merging the newest `%s` into this branch conflicts in: %s.\n\nResolve every conflict, "+
+				"keeping what both sides meant, and remove every conflict marker. Do not commit, abort or restart "+
+				"the merge: the harness completes it.", p.Base, "`"+strings.Join(conflicted, "`, `")+"`"),
+			"checks": "(not run yet: the merge comes first)", "findings": "(none: only the merge)"})
+		o, ok := w.call("fix", true, prompt)
+		if !ok || o.Err != "" {
+			w.Repo.Git("merge", "--abort")
+			if o != nil && o.Err != "" {
+				return "", fmt.Errorf("resolving the merge with %s failed: %s", p.Base, o.Err)
+			}
+			return "", fmt.Errorf("the merge with %s was not resolved", p.Base)
+		}
+		for _, path := range conflicted {
+			data, _ := os.ReadFile(filepath.Join(w.Repo.Dir, path))
+			if bytes.HasPrefix(data, []byte("<<<<<<< ")) || bytes.Contains(data, []byte("\n<<<<<<< ")) ||
+				bytes.Contains(data, []byte("\n>>>>>>> ")) {
+				w.Repo.Git("merge", "--abort")
+				return "", fmt.Errorf("the merge with %s left conflict markers in %s", p.Base, path)
+			}
+		}
+		w.Repo.MustGit("add", "-A")
+		staged, err := w.Repo.Staged(onto)
+		if err != nil {
+			panic(err)
+		}
+		for _, path := range staged {
+			if !config.MatchAny(w.Cfg.ForbiddenPaths, path) {
+				continue
+			}
+			if _, err := w.Repo.Git("cat-file", "-e", onto+":"+path); err == nil {
+				w.Repo.MustGit("checkout", onto, "--", gitx.Literal(path))
+			} else {
+				w.Repo.MustGit("rm", "-q", "-r", "-f", "--ignore-unmatch", "--", gitx.Literal(path))
+			}
+			w.result.Reverted = appendNew(w.result.Reverted, path)
+		}
+		if _, err := w.Repo.Git("rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
+			w.Repo.MustGit("commit", "-q", "--no-verify", "--no-edit")
+		} else if parents := strings.Fields(w.Repo.MustGit("rev-list", "--parents", "-n", "1", "HEAD")); len(parents) != 3 {
+			return "", fmt.Errorf("the merge with %s was abandoned during its resolution", p.Base)
+		}
+	}
+	w.note(fmt.Sprintf("Merged the newest %s into the branch first.", p.Base))
+	return w.Repo.MustGit("merge-base", onto, "HEAD"), nil
 }
 
 // audit reviews a pull request as it stands; it changes nothing. An untrusted one (another

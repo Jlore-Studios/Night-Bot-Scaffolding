@@ -1,5 +1,5 @@
 # The night bot's ears (.nightbot/README.md): comment commands, labels, assignment, reviews and
-# CI results on its pull requests. No model runs here: work is queued, and a run of
+# CI results on its pull requests and on their entries in a merge queue. No model runs here: work is queued, and a run of
 # nightbot-run.yml is started when a provider has a lane free. Every ten minutes a sweep releases
 # runs that died without delivering, starts runs for free lanes (GitHub drops some scheduled runs)
 # and rewrites the "Night bot status" issue.
@@ -37,7 +37,8 @@ jobs:
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success'
-          && startsWith(github.event.workflow_run.head_branch, 'nightbot/'))
+          && (startsWith(github.event.workflow_run.head_branch, 'nightbot/')
+              || startsWith(github.event.workflow_run.head_branch, 'gh-readonly-queue/')))
       || (github.event_name == 'pull_request_target' && github.event.action == 'closed'
           && startsWith(github.event.pull_request.head.ref, 'nightbot/'))
       || (!endsWith(github.actor, '[bot]') && (

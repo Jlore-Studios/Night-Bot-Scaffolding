@@ -360,9 +360,13 @@ func (c *REST) MarkReady(pr *PR) error {
 }
 
 func (c *REST) EnableAutoMerge(pr *PR, method, headSHA string) error {
-	return c.graphql(`mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID) {
+	vars := map[string]any{"id": pr.NodeID, "head": headSHA}
+	if method != "" {
+		vars["method"] = strings.ToUpper(method)
+	}
+	return c.graphql(`mutation($id: ID!, $method: PullRequestMergeMethod, $head: GitObjectID) {
   enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) { clientMutationId } }`,
-		map[string]any{"id": pr.NodeID, "method": strings.ToUpper(method), "head": headSHA})
+		vars)
 }
 
 // DisableAutoMerge turns auto-merge off (an error that it was not on is no error) and converts
@@ -380,9 +384,9 @@ func (c *REST) DisableAutoMerge(pr *PR) error {
 		map[string]any{"id": pr.NodeID})
 }
 
-// RequiredChecks reads the checks a branch requires from classic branch protection and from
-// rulesets, both readable with read access.
-func (c *REST) RequiredChecks(branch string) ([]string, error) {
+// Protection reads what a branch requires from classic branch protection and from rulesets,
+// both readable with read access.
+func (c *REST) Protection(branch string) (*Protection, error) {
 	var b struct {
 		Protection struct {
 			RequiredStatusChecks struct {
@@ -396,12 +400,12 @@ func (c *REST) RequiredChecks(branch string) ([]string, error) {
 	if _, err := c.do(http.MethodGet, c.repo("/branches/%s", url.PathEscape(branch)), nil, &b); err != nil {
 		return nil, err
 	}
+	p := &Protection{}
 	seen := map[string]bool{}
-	var checks []string
 	add := func(name string) {
 		if name != "" && !seen[name] {
 			seen[name] = true
-			checks = append(checks, name)
+			p.Checks = append(p.Checks, name)
 		}
 	}
 	for _, name := range b.Protection.RequiredStatusChecks.Contexts {
@@ -420,14 +424,40 @@ func (c *REST) RequiredChecks(branch string) ([]string, error) {
 	}
 	if _, err := c.do(http.MethodGet, c.repo("/rules/branches/%s", url.PathEscape(branch)), nil, &rules); err == nil {
 		for _, rule := range rules {
-			if rule.Type == "required_status_checks" {
+			switch rule.Type {
+			case "required_status_checks":
 				for _, check := range rule.Parameters.RequiredStatusChecks {
 					add(check.Context)
 				}
+			case "merge_queue":
+				p.MergeQueue = true
 			}
 		}
 	}
-	return checks, nil
+	return p, nil
+}
+
+// PutRuleset creates the ruleset of that name, or updates it in place.
+func (c *REST) PutRuleset(name string, ruleset map[string]any) error {
+	var existing []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if _, err := c.do(http.MethodGet, c.repo("/rulesets?per_page=100"), nil, &existing); err != nil {
+		return err
+	}
+	body := map[string]any{"name": name}
+	for k, v := range ruleset {
+		body[k] = v
+	}
+	for _, r := range existing {
+		if r.Name == name {
+			_, err := c.do(http.MethodPut, c.repo("/rulesets/%d", r.ID), body, nil)
+			return err
+		}
+	}
+	_, err := c.do(http.MethodPost, c.repo("/rulesets"), body, nil)
+	return err
 }
 
 func (c *REST) DispatchWorkflow(file, ref string, inputs map[string]string) error {

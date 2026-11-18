@@ -10,6 +10,8 @@
 # --operator     the person the bot asks for decisions and @-mentions; always trusted
 # --repo         OWNER/NAME (default: read from the target's origin remote)
 # --ci-workflow  the `name:` of the workflow whose failures the bot fixes (default: CI)
+# --merge-queue  merge through a merge queue: `nightbot setup --repo-settings` then writes a ruleset
+#                with the required checks and the queue (your CI must run on merge_group)
 # --upgrade      replace only the harness, the machine scripts and the build action, keeping your
 #                configuration, prompts and workflows (diff them against template/ yourself)
 # --force        overwrite an earlier install entirely (your edits to its files are lost)
@@ -21,6 +23,7 @@ bot_login=""
 operator=""
 repo=""
 ci_workflow="CI"
+merge_queue=false
 mode=install
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,9 +31,10 @@ while [ $# -gt 0 ]; do
     --operator) operator="${2:?--operator needs a value}"; shift 2 ;;
     --repo) repo="${2:?--repo needs a value}"; shift 2 ;;
     --ci-workflow) ci_workflow="${2:?--ci-workflow needs a value}"; shift 2 ;;
+    --merge-queue) merge_queue=true; shift ;;
     --upgrade) mode=upgrade; shift ;;
     --force) mode=force; shift ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown flag $1" >&2; exit 2 ;;
     *) [ -z "$target" ] || { echo "one target directory only" >&2; exit 2; }; target="$1"; shift ;;
   esac
@@ -90,6 +94,7 @@ sed -i.bak \
   -e "s#\"OPERATOR_LOGIN\"#\"$operator\"#" \
   -e "s#\"default_branch\": \"main\"#\"default_branch\": \"$branch\"#" \
   -e "s#\"ci_workflow\": \"CI\"#\"ci_workflow\": \"$ci_workflow\"#" \
+  -e "s#\"merge_queue\": false#\"merge_queue\": $merge_queue#" \
   "$config"
 rm -f "$config.bak"
 events="$target/.github/workflows/nightbot-events.yml"
@@ -100,8 +105,11 @@ sed -i.bak -e "s#branches: \[main\]#branches: [$branch]#" "$selftest"
 rm -f "$selftest.bak"
 
 echo "Installed the night bot into $target ($repo, default branch $branch)."
-if ! grep -rqsE "^name: *[\"']?${ci_workflow}[\"']? *$" "$target/.github/workflows"; then
+ci_file="$(grep -rlsE "^name: *[\"']?${ci_workflow}[\"']? *$" "$target/.github/workflows" | head -n1 || true)"
+if [ -z "$ci_file" ]; then
   echo "note: no workflow in .github/workflows is named \"$ci_workflow\"; pass --ci-workflow with your CI's name, or the bot never sees red CI."
+elif [ "$merge_queue" = true ] && ! grep -q 'merge_group' "$ci_file"; then
+  echo "note: ${ci_file#"$target"/} does not run on merge_group; add \"merge_group:\" to its \"on:\", or the merge queue waits for its checks for ever."
 fi
 cat <<EOF
 

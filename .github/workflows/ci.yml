@@ -4,6 +4,7 @@ name: CI
 
 on:
   pull_request:
+  merge_group: # the merge queue runs these checks again on top of the newest main
   push:
     branches: [main]
 

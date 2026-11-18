@@ -32,6 +32,9 @@ type Plan struct {
 	Base       string `json:"base"`
 	Branch     string `json:"branch"`
 	Continue   bool   `json:"continue"` // the branch exists: carry its work on
+	// MergeBase merges the newest base branch into the pull request first: the merge queue sent
+	// it back, or it conflicts with the base.
+	MergeBase bool `json:"merge_base,omitempty"`
 	// Untrusted is a pull request from another repository or a person off the trust list: it is
 	// reviewed (or asked about) from its diff alone, never checked out, built or run.
 	Untrusted    bool      `json:"untrusted,omitempty"`

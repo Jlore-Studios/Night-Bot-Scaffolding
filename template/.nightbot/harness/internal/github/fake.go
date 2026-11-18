@@ -23,6 +23,8 @@ type Fake struct {
 	Logs       map[int64]string
 	Labels     map[string]bool
 	Required   []string
+	MergeQueue bool
+	Rulesets   map[string]map[string]any
 	Login      string
 	RepoName   string
 	Reactions  map[int64][]string
@@ -49,7 +51,8 @@ func NewFake() *Fake {
 		Reviews: map[int][]*Review{}, Runs: map[int64]*Run{}, Jobs: map[int64][]*Job{},
 		Logs: map[int64]string{}, Labels: map[string]bool{}, Reactions: map[int64][]string{},
 		AutoMerge: map[int]string{}, Repo: map[string]any{}, Protected: map[string][]string{},
-		Login: "nightbot", RepoName: "o/r", nextID: 1000, nextNumber: 1}
+		Rulesets: map[string]map[string]any{},
+		Login:    "nightbot", RepoName: "o/r", nextID: 1000, nextNumber: 1}
 }
 
 // AddIssue files an issue, or a pull request with pr set, and returns its number.
@@ -384,10 +387,28 @@ func (f *Fake) SetHead(number int, sha string) {
 	}
 }
 
-func (f *Fake) RequiredChecks(branch string) ([]string, error) {
+func (f *Fake) Protection(branch string) (*Protection, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.Required...), nil
+	return &Protection{Checks: append([]string(nil), f.Required...), MergeQueue: f.MergeQueue}, nil
+}
+
+func (f *Fake) PutRuleset(name string, ruleset map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Rulesets[name] = ruleset
+	for _, rule := range ruleset["rules"].([]map[string]any) {
+		switch rule["type"] {
+		case "merge_queue":
+			f.MergeQueue = true
+		case "required_status_checks":
+			f.Required = nil
+			for _, c := range rule["parameters"].(map[string]any)["required_status_checks"].([]map[string]string) {
+				f.Required = append(f.Required, c["context"])
+			}
+		}
+	}
+	return nil
 }
 
 func (f *Fake) DispatchWorkflow(file, ref string, inputs map[string]string) error {

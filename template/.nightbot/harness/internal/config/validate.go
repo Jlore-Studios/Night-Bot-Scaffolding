@@ -240,3 +240,26 @@ func clock(hhmm string) int {
 	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
 	return h*60 + m
 }
+
+// CIRunsInMergeQueue says whether the workflow named ci_workflow runs on merge_group events,
+// which a merge queue needs: it waits for the required checks on its own temporary branch.
+func (c *Config) CIRunsInMergeQueue() bool {
+	files, _ := filepath.Glob(filepath.Join(c.Root, ".github", "workflows", "*.y*ml"))
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		text := string(data)
+		named := false
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "name:") && strings.Trim(strings.TrimSpace(line[5:]), `"'`) == c.CIWorkflow {
+				named = true
+			}
+		}
+		if named {
+			return strings.Contains(text, "merge_group")
+		}
+	}
+	return false
+}

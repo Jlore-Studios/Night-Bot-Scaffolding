@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"nightbot/internal/github"
@@ -528,24 +529,53 @@ func (b *Bot) onIssueEvent(ev *Event) error {
 	return nil
 }
 
-// onCI queues a CI fix when a required workflow fails on the bot's pull request.
+// queueBranch is the temporary branch a merge queue tests a pull request on:
+// gh-readonly-queue/<base>/pr-<number>-<head sha>.
+var queueBranch = regexp.MustCompile(`^gh-readonly-queue/(.+)/pr-(\d+)-([0-9a-f]{7,40})$`)
+
+// onCI queues a CI fix when a required workflow fails on the bot's pull request, or on its entry
+// in the merge queue, which tests it on top of the newest default branch and the pull requests
+// queued ahead of it: that fix merges the default branch in first.
 func (b *Bot) onCI(ev *Event) error {
 	run := ev.WorkflowRun
-	if run == nil || run.Name != b.Cfg.CIWorkflow || !strings.HasPrefix(run.HeadBranch, b.Cfg.BranchPrefix) ||
-		run.HeadRepo == nil || !strings.EqualFold(run.HeadRepo.FullName, b.Cfg.Repo) {
-		return nil // not CI of the bot's own branch here (a fork's branch of the same name is not)
+	if run == nil || run.Name != b.Cfg.CIWorkflow || run.HeadRepo == nil || !strings.EqualFold(run.HeadRepo.FullName, b.Cfg.Repo) {
+		return nil // not CI of a branch here (a fork's branch of the same name is not)
 	}
 	switch run.Conclusion {
 	case "failure", "timed_out":
 	default:
 		return nil
 	}
-	pr, err := b.GH.FindPR(run.HeadBranch)
-	if err != nil || pr == nil || !hasLabel(pr.Labels, b.Cfg.Label("pr")) || hasLabel(pr.Labels, "human") || b.notOurs(pr) != "" {
-		return err
+	var pr *github.PR
+	var err error
+	queued := queueBranch.FindStringSubmatch(run.HeadBranch)
+	switch {
+	case queued != nil:
+		number, _ := strconv.Atoi(queued[2])
+		if pr, err = b.GH.GetPR(number); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(pr.Head.SHA, queued[3]) {
+			return nil // the queue's run of an older head
+		}
+	case strings.HasPrefix(run.HeadBranch, b.Cfg.BranchPrefix):
+		if pr, err = b.GH.FindPR(run.HeadBranch); err != nil || pr == nil {
+			return err
+		}
+		if pr.Head.SHA != "" && run.HeadSHA != "" && pr.Head.SHA != run.HeadSHA {
+			return nil // CI of an older head
+		}
+	default:
+		return nil
 	}
-	if pr.Head.SHA != "" && run.HeadSHA != "" && pr.Head.SHA != run.HeadSHA {
-		return nil // CI of an older head
+	if !hasLabel(pr.Labels, b.Cfg.Label("pr")) || hasLabel(pr.Labels, "human") || b.notOurs(pr) != "" {
+		return nil
+	}
+	note := fmt.Sprintf("CI failed on %.12s: %s. Its failing jobs' logs follow.", run.HeadSHA, run.HTMLURL)
+	if queued != nil {
+		note = fmt.Sprintf("CI failed in the merge queue (%s): the change does not hold on top of the newest %s "+
+			"and the pull requests queued ahead of it. The harness merged %s in first; fix what fails now. "+
+			"Its failing jobs' logs follow.", run.HTMLURL, queued[1], queued[1])
 	}
 	fixes := 0
 	_, err = b.Store.Update(fmt.Sprintf("CI failed on #%d", pr.Number), func(s *state.State) error {
@@ -558,7 +588,8 @@ func (b *Bot) onCI(ev *Event) error {
 		fixes = mem.CIFixes
 		if fixes <= b.Cfg.MaxCIFixes {
 			mem.CIRun = run.ID
-			mem.Notes = append(mem.Notes, fmt.Sprintf("CI failed on %.12s: %s. Its failing jobs' logs follow.", run.HeadSHA, run.HTMLURL))
+			mem.Notes = append(mem.Notes, note)
+			mem.MergeMain = mem.MergeMain || queued != nil
 		}
 		return nil
 	})
@@ -572,7 +603,11 @@ func (b *Bot) onCI(ev *Event) error {
 		return nil
 	}
 	b.GH.AddLabels(pr.Number, b.Cfg.Label("revise"))
-	b.say(pr.Number, fmt.Sprintf("CI failed ([run](%s)); queued a fix (%d of %d).", run.HTMLURL, fixes, b.Cfg.MaxCIFixes))
+	where := "CI failed"
+	if queued != nil {
+		where = "CI failed in the merge queue"
+	}
+	b.say(pr.Number, fmt.Sprintf("%s ([run](%s)); queued a fix (%d of %d).", where, run.HTMLURL, fixes, b.Cfg.MaxCIFixes))
 	b.Kick()
 	return nil
 }

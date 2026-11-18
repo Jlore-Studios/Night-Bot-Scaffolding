@@ -49,6 +49,9 @@ case "$prompt" in
       printf '#!/bin/sh\ntouch "$FAKE_DIR/hook-ran"\n' > .git/hooks/post-commit && chmod +x .git/hooks/post-commit
     fi
     echo "I added hello.txt." ;;
+  *"conflicts in:"*)
+    printf 'hello from the branch and from main\n' > hello.txt
+    echo "Resolved the conflict in hello.txt." ;;
   *"# Revise "*)
     echo fixed >> hello.txt
     echo "Fixed what was asked." ;;
@@ -663,5 +666,100 @@ func TestRelease_AnOldRunCannotDropANewerClaim(t *testing.T) {
 	e.bot.Sweep()
 	if mem := e.state().Peek(1); len(e.state().Running) != 0 || (mem != nil && mem.Failures != 0) {
 		t.Fatalf("a cancelled run is released, with no failure: %+v", e.state())
+	}
+}
+
+func TestFlow_AMergeQueueFailureMergesMainAndShipsThroughTheQueue(t *testing.T) {
+	e := newEnv(t, nil)
+	e.gh.MergeQueue = true
+	e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	p, _ := e.run(PlanOptions{})
+	pr, _ := e.gh.GetPR(mustPR(t, e, p.Branch))
+	if got := e.gh.AutoMerge[pr.Number]; got != "@"+pr.Head.SHA {
+		t.Fatalf("with a merge queue, auto-merge leaves the method to the queue: %q", got)
+	}
+	// main moves on meanwhile, with a change of its own to the same file.
+	other := filepath.Join(t.TempDir(), "other")
+	git(t, filepath.Dir(other), "clone", "-q", e.origin, other)
+	os.WriteFile(filepath.Join(other, "hello.txt"), []byte("hello from main\n"), 0o644)
+	git(t, other, "add", "-A")
+	git(t, other, "-c", "user.name=o", "-c", "user.email=o@e", "commit", "-q", "-m", "main's hello")
+	git(t, other, "push", "-q", "origin", "main")
+	mainHead := git(t, other, "rev-parse", "HEAD")
+
+	ev := &Event{}
+	json.Unmarshal([]byte(fmt.Sprintf(`{"workflow_run": {"id": 88, "name": "CI", "conclusion": "failure",
+		"head_branch": "gh-readonly-queue/main/pr-%d-%s", "head_sha": "abc", "html_url": "https://ci/88",
+		"head_repository": {"full_name": "o/r"}}}`, pr.Number, pr.Head.SHA)), ev)
+	if err := e.bot.Handle("workflow_run", ev); err != nil {
+		t.Fatal(err)
+	}
+	if mem := e.state().Peek(pr.Number); mem == nil || !mem.MergeMain || !slices.Contains(e.gh.LabelsOf(pr.Number), "bot:revise") {
+		t.Fatalf("the queue's failure should queue a revision that merges main: %+v", mem)
+	}
+	revise, r := e.run(PlanOptions{})
+	if !revise.MergeBase || r.Outcome != job.Approved {
+		t.Fatalf("plan %+v result %+v", revise, r)
+	}
+	head := git(t, e.origin, "rev-parse", p.Branch)
+	parents := strings.Fields(git(t, e.origin, "rev-list", "--parents", "-n", "1", head+"~1"))
+	if len(parents) != 3 || parents[2] != mainHead {
+		t.Fatalf("the branch should hold a real merge of main (%s): %v", mainHead, parents)
+	}
+	if base := git(t, e.origin, "merge-base", "main", p.Branch); base != mainHead {
+		t.Fatalf("the change should now start from the newest main: %s", base)
+	}
+	if text := git(t, e.origin, "show", p.Branch+":hello.txt"); strings.Contains(text, "<<<<<<<") || !strings.Contains(text, "from main") {
+		t.Fatalf("hello.txt: %q", text)
+	}
+	if !slices.Equal(r.Changed, []string{"hello.txt"}) {
+		t.Fatalf("the change against the new main: %v", r.Changed)
+	}
+	if got := e.gh.AutoMerge[pr.Number]; got != "@"+head {
+		t.Fatalf("the approved merge should rejoin the queue at its new head: %q", got)
+	}
+	if mem := e.state().Peek(pr.Number); mem.MergeMain {
+		t.Error("the merge request should be used up")
+	}
+}
+
+func mustPR(t *testing.T, e *env, branch string) int {
+	t.Helper()
+	pr, _ := e.gh.FindPR(branch)
+	if pr == nil {
+		t.Fatalf("no pull request for %s", branch)
+	}
+	return pr.Number
+}
+
+func TestFlow_TheSweepMergesMainIntoAConflictedPullRequest(t *testing.T) {
+	e := newEnv(t, nil)
+	e.gh.AddIssue("Add hello", "Please.", "boss", "bot:build", "difficulty:medium")
+	p, _ := e.run(PlanOptions{})
+	n := mustPR(t, e, p.Branch)
+	e.gh.PRs[n].MergeableState = "dirty"
+	if err := e.bot.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if mem := e.state().Peek(n); !mem.MergeMain || !slices.Contains(e.gh.LabelsOf(n), "bot:revise") {
+		t.Fatalf("a conflicted pull request should be queued for a merge: %+v %v", mem, e.gh.LabelsOf(n))
+	}
+	e.bot.Sweep() // once is enough: no second note
+	if notes := e.state().Peek(n).Notes; len(notes) != 1 {
+		t.Fatalf("notes: %q", notes)
+	}
+}
+
+func TestSetup_WritesTheMergeQueueRuleset(t *testing.T) {
+	e := newEnv(t, func(cfg map[string]any) { cfg["merge_queue"] = true })
+	if err := e.bot.Setup(true); err != nil {
+		t.Fatal(err)
+	}
+	rs := e.gh.Rulesets[RulesetName]
+	if rs == nil || !e.gh.MergeQueue || !slices.Equal(e.gh.Required, []string{"CI"}) {
+		t.Fatalf("ruleset %v, merge queue %v, required %v", rs, e.gh.MergeQueue, e.gh.Required)
+	}
+	if e.gh.Repo["allow_auto_merge"] != true || len(e.gh.Protected) != 0 {
+		t.Fatalf("repo %v, classic protection %v", e.gh.Repo, e.gh.Protected)
 	}
 }

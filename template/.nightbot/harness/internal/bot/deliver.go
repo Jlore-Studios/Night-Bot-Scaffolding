@@ -218,7 +218,7 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 	}
 	_, err = b.Store.Update(fmt.Sprintf("delivered #%d", pr), func(s *state.State) error {
 		mem := s.Item(pr)
-		mem.Branch, mem.LastProvider, mem.Notes, mem.CIRun = p.Branch, p.Provider, nil, 0
+		mem.Branch, mem.LastProvider, mem.Notes, mem.CIRun, mem.MergeMain = p.Branch, p.Provider, nil, 0, false
 		mem.Builders = append(mem.Builders, p.Provider+"/"+p.Model)
 		if p.Rated {
 			mem.Difficulty = p.Difficulty
@@ -257,7 +257,7 @@ func quoteBlock(text string) string {
 func (b *Bot) clearNotes(p *job.Plan) error {
 	_, err := b.Store.Update(fmt.Sprintf("notes of #%d", p.Number), func(s *state.State) error {
 		if mem := s.Peek(p.Number); mem != nil {
-			mem.Notes, mem.CIRun = nil, 0
+			mem.Notes, mem.CIRun, mem.MergeMain = nil, 0, false
 		}
 		return nil
 	})
@@ -393,7 +393,7 @@ func (b *Bot) ship(pr int, p *job.Plan, r *job.Result, head string, changed []st
 		b.GH.AddLabels(pr, "ready for merge")
 		b.say(pr, approval+" Auto-merge is off (`auto_merge`), so a person merges it.")
 	default:
-		missing, err := b.unprotected()
+		missing, queue, err := b.unprotected()
 		if err != nil || len(missing) > 0 {
 			why := fmt.Sprint(err)
 			if err == nil {
@@ -403,12 +403,18 @@ func (b *Bot) ship(pr int, p *job.Plan, r *job.Result, head string, changed []st
 			b.say(pr, fmt.Sprintf("%s%s I left auto-merge off: %s.", b.operator(), approval, why))
 			return nil
 		}
-		if err := b.GH.EnableAutoMerge(current, b.Cfg.MergeMethod, head); err != nil {
+		method, how := b.Cfg.MergeMethod, "it merges once the required checks pass"
+		if queue {
+			// The queue's own rule sets the merge method; auto-merge adds it to the queue, which
+			// runs CI again on the newest default branch with the pull requests ahead of it.
+			method, how = "", "it joins the merge queue once the required checks pass"
+		}
+		if err := b.GH.EnableAutoMerge(current, method, head); err != nil {
 			b.GH.AddLabels(pr, "ready for merge")
 			b.say(pr, fmt.Sprintf("%s%s Auto-merge would not turn on: %v", b.operator(), approval, err))
 			return nil
 		}
-		b.say(pr, approval+" Auto-merge is on: it merges once the required checks pass.")
+		b.say(pr, fmt.Sprintf("%s Auto-merge is on for %.12s: %s.", approval, head, how))
 	}
 	return nil
 }
@@ -444,18 +450,19 @@ func (b *Bot) changedOf(pr *github.PR, head string) ([]string, error) {
 	return repo.Changed(base, headRef)
 }
 
-// unprotected is the required_checks the default branch does not require, or an error when its
-// protection cannot be read. Auto-merge merges at once on a branch that requires nothing.
-func (b *Bot) unprotected() ([]string, error) {
-	required, err := b.GH.RequiredChecks(b.Cfg.DefaultBranch)
+// unprotected is the required_checks the default branch does not require, and whether it
+// merges through a merge queue, or an error when its protection cannot be read or requires
+// nothing (auto-merge would merge at once on a branch that requires nothing).
+func (b *Bot) unprotected() ([]string, bool, error) {
+	protection, err := b.GH.Protection(b.Cfg.DefaultBranch)
 	if err != nil {
-		return nil, fmt.Errorf("its branch protection could not be read: %w", err)
+		return nil, false, fmt.Errorf("its branch protection could not be read: %w", err)
 	}
-	if len(required) == 0 {
-		return nil, fmt.Errorf("%s requires no checks, so auto-merge would merge before CI", b.Cfg.DefaultBranch)
+	if len(protection.Checks) == 0 {
+		return nil, protection.MergeQueue, fmt.Errorf("%s requires no checks, so auto-merge would merge before CI", b.Cfg.DefaultBranch)
 	}
 	have := map[string]bool{}
-	for _, name := range required {
+	for _, name := range protection.Checks {
 		have[name] = true
 	}
 	var missing []string
@@ -464,7 +471,7 @@ func (b *Bot) unprotected() ([]string, error) {
 			missing = append(missing, name)
 		}
 	}
-	return missing, nil
+	return missing, protection.MergeQueue, nil
 }
 
 func (b *Bot) deliverAudit(p *job.Plan, r *job.Result) error {

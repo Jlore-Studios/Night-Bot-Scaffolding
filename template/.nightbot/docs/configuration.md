@@ -20,9 +20,10 @@ fields are errors, so a typo never silently does nothing.
 | `trust_collaborators` | `false` | also trust anyone GitHub calls an owner, member or collaborator |
 | `triage` | `false` | rate unrated items with a weak model before they are built |
 | `ci_workflow` | `CI` | the `name:` of your CI workflow; its failures on the bot's branches queue fixes (also in the events workflow's `workflow_run`) |
-| `required_checks` | `[]` | the checks the default branch must require before the bot turns auto-merge on; `setup --repo-settings` requires them |
+| `required_checks` | `[]` | the checks the default branch must require before the bot turns auto-merge on; `setup --repo-settings` requires them (in a ruleset with `merge_queue`, in branch protection without) |
 | `auto_merge` | `true` | turn on auto-merge for an approved change; off, a person merges every one |
-| `merge_method` | `squash` | `squash`, `merge` or `rebase` |
+| `merge_method` | `squash` | `squash`, `merge` or `rebase` (with a merge queue, the queue's rule) |
+| `merge_queue` | `false` | merge through a merge queue: `setup --repo-settings` writes a ruleset with the required checks and the queue ([README](../README.md#the-merge-queue)); your CI must run on `merge_group` |
 | `checks` | `[]` | `{name, run, timeout_minutes}`: shell commands that prove a change works, run after every change in a clean environment |
 | `fix_passes` | `2` | how many times the builder may fix red checks in a row |
 | `review_rounds` | `{"medium": 3, "hard": 6}` | reviews per run, by difficulty |

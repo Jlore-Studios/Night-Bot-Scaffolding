@@ -21,6 +21,9 @@ specific to that project taken out.
   ([machines](template/.nightbot/machine/README.md)).
 - **The model never holds a GitHub write token**, and the bot cannot change its own rules
   ([security](template/.nightbot/docs/security.md)).
+- **Merge queues.** Approved changes join the queue pinned to the reviewed commit; one the queue
+  throws out comes back with the newest `main` merged in and the failure fixed, and one that
+  conflicts with `main` gets the merge by itself ([merge queue](template/.nightbot/README.md#the-merge-queue)).
 - **One Go binary, standard library only**, built and cached by the workflows; no service to host.
 
 ## How it works
@@ -52,8 +55,9 @@ computer, and at least one model subscription (a Claude Pro or Max plan is enoug
    ./Night-Bot-Scaffolding/install.sh path/to/your-repo --bot-login your-bot --operator your-login --ci-workflow CI
    ```
 
-   `--ci-workflow` is the `name:` of your CI workflow. This copies `.nightbot/` (the harness, its
-   configuration, prompts, docs and machine scripts) and three workflows into your repository.
+   `--ci-workflow` is the `name:` of your CI workflow. Add `--merge-queue` to merge through a
+   merge queue (your CI must then run on `merge_group`). This copies `.nightbot/` (the harness,
+   its configuration, prompts, docs and machine scripts) and three workflows into your repository.
 
 2. **Give the bot a GitHub identity.** Pushes and pull requests made with a workflow's own
    `GITHUB_TOKEN` start no CI, so the bot needs its own:
@@ -136,6 +140,13 @@ cd template/.nightbot/harness
 gofmt -l . && go vet ./... && go test -race ./...
 cd ../machine/starter && python3 -m unittest -v
 shellcheck -x ../*/*.sh
+```
+
+This repository protects its own `main` the same way: CI's four jobs required, and a merge queue
+(`.github/ruleset-main.json`). An admin applies it once:
+
+```bash
+gh api -X POST repos/Jlore-Studios/Night-Bot-Scaffolding/rulesets --input .github/ruleset-main.json
 ```
 
 The harness's end-to-end tests run whole runs (plan, a scripted stand-in for a model CLI working

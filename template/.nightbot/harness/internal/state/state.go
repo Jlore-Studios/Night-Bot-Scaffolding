@@ -57,7 +57,8 @@ type Item struct {
 	Branch       string   `json:"branch,omitempty"`
 	Difficulty   string   `json:"difficulty,omitempty"`
 	Triaged      bool     `json:"triaged,omitempty"`
-	Notes        []string `json:"notes,omitempty"` // what the next revision must address
+	Notes        []string `json:"notes,omitempty"`      // what the next revision must address
+	MergeMain    bool     `json:"merge_main,omitempty"` // the next revision merges the default branch in first
 	CIRun        int64    `json:"ci_run,omitempty"`
 	CIFixes      int      `json:"ci_fixes,omitempty"`
 	Audits       int      `json:"audits,omitempty"`
