@@ -87,6 +87,12 @@ computer, and at least one model subscription (a Claude Pro or Max plan is enoug
    GITHUB_TOKEN=$(gh auth token) go run ./cmd/nightbot setup --repo-settings
    ```
 
+   On a **public** repository, also allow `pull_request_target` for
+   `.github/workflows/nightbot-events.yml`, and for no other workflow, in the repository's (or its
+   organization's) Actions event policies. From 2026-12-02 GitHub blocks that event in public
+   repositories unless a policy allows it, and without it the bot never hears its pull requests
+   close or a label put on one. The workflow runs none of the pull request's code.
+
 6. **Try it.** Open an issue, comment `/nightbot build --force`, and watch the `nightbot-run`
    workflow in the Actions tab. A manual run of `nightbot-run` takes `dry_run`, which records every
    GitHub write instead of making it. The **Night bot status** issue shows what runs, the
