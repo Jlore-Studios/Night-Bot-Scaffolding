@@ -33,7 +33,11 @@ class Sandbox(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        self.env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        # Nothing of the machine the tests run on leaks in: a CI runner sets RUNNER_TEMP (which
+        # makes clean.sh think it is a job's own hook) and has a real cloud-init.
+        inherited = {k: v for k, v in os.environ.items()
+                     if not k.startswith(("RUNNER_", "GITHUB_", "ACTIONS_", "NIGHTBOT_"))}
+        self.env = {**inherited, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
 
 
 class ParseTests(unittest.TestCase):
@@ -266,6 +270,7 @@ class IdleStopTests(Sandbox):
         self.log = self.tmp / "log"
         for name in ("logger", "shutdown", "systemctl"):
             stub(self.bin, name, f'echo "{name} $*" >> "$LOG"')
+        stub(self.bin, "cloud-init", 'echo "status: ${CLOUD_INIT:-done}"')
         stub(self.bin, "pgrep", '[ -n "${BUSY:-}" ] && case "$*" in *"$BUSY"*) exit 0;; esac\nexit 1')
         stub(self.bin, "who", 'printf "%s" "${WHO:-}"')
         stub(self.bin, "curl", 'echo "curl $*" >> "$LOG"\n[ -z "${CURL_FAILS:-}" ] || exit 22\n'
@@ -292,7 +297,7 @@ class IdleStopTests(Sandbox):
 
     def test_busy_or_not_idle_long_enough_does_nothing(self):
         for env in ({"BUSY": "Runner.Worker"}, {"BUSY": "ssm-user"}, {"WHO": "me pts/0"},
-                    {"BUSY": "sshd"}, {"BUSY": "nightbot-run"}, {"BUSY": "dpkg"}):
+                    {"BUSY": "sshd"}, {"BUSY": "nightbot-run"}, {"BUSY": "dpkg"}, {"CLOUD_INIT": "running"}):
             self.assertEqual(self.run_it("aws", "poweroff", **env), "", env)
             self.assertLess(int(time.time()) - int(self.stamp.read_text()), 5)  # stamped now
         self.assertEqual(self.run_it("aws", "poweroff", idle_minutes=20), "")
