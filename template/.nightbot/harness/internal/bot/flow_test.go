@@ -471,3 +471,17 @@ func TestFlow_SweepNoticesAPullRequestClosedWithoutAnEvent(t *testing.T) {
 		t.Fatalf("the issue should build again: %+v", again)
 	}
 }
+
+func TestFlow_AssigningTheBotQueuesAndStartsARun(t *testing.T) {
+	e := newEnv(t, nil)
+	n := e.gh.AddIssue("Add hello", "Please.", "boss", "difficulty:medium")
+	issue, _ := e.gh.GetIssue(n)
+	err := e.bot.Handle("issues", &Event{Action: "assigned", Issue: issue, Assignee: &github.User{Login: "nightbot"},
+		Sender: github.User{Login: "boss"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.gh.LabelsOf(n), "bot:build") || !e.gh.HasComment(n, "Queued.") || len(e.gh.Dispatched) != 1 {
+		t.Fatalf("labels %v, comments %q, dispatched %v", e.gh.LabelsOf(n), e.gh.CommentsOn(n), e.gh.Dispatched)
+	}
+}

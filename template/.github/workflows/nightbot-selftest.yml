@@ -32,3 +32,8 @@ jobs:
       - name: Validate the configuration
         working-directory: .nightbot/harness
         run: go run ./cmd/nightbot validate
+      - name: The machine scripts' tests
+        working-directory: .nightbot/machine/starter
+        run: python3 -B -m unittest
+      - name: shellcheck the machine scripts
+        run: shellcheck -x .nightbot/machine/*/*.sh

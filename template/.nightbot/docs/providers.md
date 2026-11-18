@@ -70,6 +70,44 @@ exceeded`, `too many requests`, …) in a call that failed, reads the reset time
 gives one (`resets at 3pm (America/New_York)`, `try again in 30 minutes`, an ISO time, a Unix
 time), and parks the provider until then. Your prompts and the bot's tests do not depend on the CLI.
 
+## A local model for the weak queries
+
+A small open model on a machine of yours can answer the questions and triage for nothing, keeping
+your subscriptions for the builds. For example, the Codex CLI's `--oss` mode runs a model through
+[Ollama](https://ollama.com) on the same box (check `codex exec --help` on your version):
+
+```json
+"clis": {
+  "codex-local": {
+    "install": "npm install -g @openai/codex && curl -fsSL https://ollama.com/install.sh | sh",
+    "argv": ["codex", "exec", "--oss", "--skip-git-repo-check", "--cd", "{cwd}", "--model", "{model}",
+             "--output-last-message", "{answer_file}"],
+    "write_args": ["--sandbox", "workspace-write"],
+    "read_args": ["--sandbox", "read-only"],
+    "tail": ["-"],
+    "answer": "file"
+  }
+}
+```
+
+```json
+"local": {
+  "enabled": true,
+  "cli": "codex-local",
+  "models": [{ "model": "gpt-oss:20b", "tier": "weak" }],
+  "login": "machine",
+  "runs_on": "nightbot-local",
+  "lanes": 1
+}
+```
+
+Give the machine a runner labelled `nightbot-local` ([`../machine/README.md`](../machine/README.md#a-machine-of-your-own),
+the local guide; `setup.sh` runs the `install` above), pull the model once (`ollama pull
+gpt-oss:20b`), and put
+`local` first in `priority`: weak models tie on tier, ties go by priority, so the planner sends
+every weak query there while it has a lane free, and to a subscription's weak model when it has not. A model good enough to build with can take a `medium`
+tier the same way.
+
 ## Where a provider runs
 
 `runs_on: ubuntu-latest` (or any GitHub-hosted label) installs the CLI in every run, and suits a

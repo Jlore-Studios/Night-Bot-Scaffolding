@@ -492,8 +492,13 @@ func (b *Bot) onIssueEvent(ev *Event) error {
 	case ev.Action == "labeled" && ev.Label != nil && !b.isBot(ev.Sender.Login) &&
 		(ev.Label.Name == b.Cfg.Label("revise") || ev.Label.Name == b.Cfg.Label("review")):
 		b.Kick()
-	case ev.Action == "assigned" && ev.Assignee != nil && b.isBot(ev.Assignee.Login) && ev.Issue != nil:
-		return b.GH.AddLabels(ev.Issue.Number, b.Cfg.Label("build"))
+	case ev.Action == "assigned" && ev.Assignee != nil && b.isBot(ev.Assignee.Login) && ev.Issue != nil && !ev.Issue.IsPR():
+		// The label's own event is the bot's, which it ignores, so the reply and the run start here.
+		reply, start := b.queueBuild(ev.Issue.Number, false)
+		b.say(ev.Issue.Number, reply)
+		if start {
+			b.Kick()
+		}
 	case ev.Action == "closed" && ev.PullRequest != nil && hasLabel(ev.PullRequest.Labels, b.Cfg.Label("pr")):
 		number := ev.PullRequest.Number
 		_, err := b.Store.Update(fmt.Sprintf("closed #%d", number), func(s *state.State) error {

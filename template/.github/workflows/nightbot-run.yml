@@ -121,6 +121,14 @@ jobs:
           name: plan
           path: ${{ runner.temp }}/plan
 
+      # On a machine of your own, the job's temporary files go in RUNNER_TEMP, which the runner
+      # empties after every job, not in the /tmp every provider's jobs share.
+      - name: Keep the job's temporary files with the job
+        if: needs.plan.outputs.hosted != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
+
       - if: needs.plan.outputs.hosted == 'true'
         uses: actions/setup-node@v4
         with:

@@ -36,7 +36,7 @@ jobs:
           python-version: "3.12"
       - name: The starters' tests
         working-directory: template/.nightbot/machine/starter
-        run: python -m unittest -v
+        run: python -B -m unittest -v
       - name: shellcheck
         run: find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 shellcheck -x
 
