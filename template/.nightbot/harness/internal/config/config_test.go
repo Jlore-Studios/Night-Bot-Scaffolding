@@ -29,9 +29,14 @@ func TestLoad_TheTemplateIsValid(t *testing.T) {
 	if err := cfg.CheckWorkflows(); err != nil {
 		t.Fatal(err)
 	}
-	claude := cfg.Providers.Providers["claude"]
-	if claude == nil || claude.Secret != "CLAUDE_CODE_OAUTH_TOKEN" || claude.Strongest() != "strong" {
-		t.Fatalf("claude: %+v", claude)
+	// An install may rename and replace the providers; every one must still be complete.
+	if len(cfg.Providers.Providers) == 0 {
+		t.Fatal("no providers")
+	}
+	for id, p := range cfg.Providers.Providers {
+		if p.Strongest() == "" || (p.CLI == "claude" && p.Login == "secret" && p.Secret == "") {
+			t.Fatalf("%s: %+v", id, p)
+		}
 	}
 	if cfg.CLIs["claude"].System != "file" || cfg.CLIs["gemini"].System != "prepend" {
 		t.Fatalf("system delivery: claude %q gemini %q", cfg.CLIs["claude"].System, cfg.CLIs["gemini"].System)
