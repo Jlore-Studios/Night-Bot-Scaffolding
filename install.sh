@@ -121,5 +121,7 @@ Next (README.md, "Quick start", has the details):
      NIGHTBOT_APP_PRIVATE_KEY), and each enabled provider's login secret.
   4. Commit and push, then once, with an admin token:
        cd .nightbot/harness && GITHUB_TOKEN=\$(gh auth token) go run ./cmd/nightbot setup --repo-settings
+     On a public repository, also allow pull_request_target for .github/workflows/nightbot-events.yml
+     alone in the Actions event policies: GitHub blocks it there by default from 2026-12-02.
   5. Label an issue bot:build, or comment "/nightbot build --force" on it.
 EOF

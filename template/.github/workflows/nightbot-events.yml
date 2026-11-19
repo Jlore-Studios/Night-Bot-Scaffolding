@@ -18,7 +18,10 @@ on:
   issues:
     types: [labeled, assigned]
   # _target: this repository's workflow and secrets, never code from the pull request; the job
-  # checks out the default branch and reads only the event's payload.
+  # checks out the default branch and reads only the event's payload. `pull_request` would not do:
+  # it runs nothing while a pull request has a merge conflict and delivers `closed` unreliably.
+  # From 2026-12-02 GitHub blocks `_target` in public repositories unless an Actions event policy
+  # allows it: allow it for this file alone (.nightbot/README.md, Setting it up).
   pull_request_target:
     types: [labeled, closed]
   workflow_run:

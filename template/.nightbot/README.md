@@ -146,6 +146,12 @@ A run that is going finishes its current step; `stop` cancels it outright.
    GITHUB_TOKEN=$(gh auth token) go run ./cmd/nightbot setup --repo-settings
    GITHUB_TOKEN=$(gh auth token) go run ./cmd/nightbot doctor
    ```
+
+   On a **public** repository, an admin also allows `pull_request_target` for
+   `.github/workflows/nightbot-events.yml` alone, in the repository's (or its organization's)
+   Actions event policies: from 2026-12-02 GitHub blocks it in public repositories unless a policy
+   allows it, and without it the bot never hears its pull requests close or a label put on one.
+   The workflow checks out the default branch and runs none of the pull request's code.
 5. **Try it**: open an issue, comment `/nightbot build --force`, and watch the `nightbot-run`
    workflow. Its manual run takes `dry_run`, which records every GitHub write instead of sending it.
 
@@ -155,6 +161,7 @@ A run that is going finishes its current step; `stop` cancels it outright.
 |---|---|
 | a command got no 👀 | the `nightbot-events` run for that comment: are you on `trust.txt`? did the workflow's `if` filter skip it? |
 | an item never starts | `/nightbot status`: the queue says what each item waits on (a provider's hours, caps, a missing secret, no free lane) |
+| a pull request's close or label got no answer | its `nightbot-events` run: one that failed at once, blocked by policy, means a public repository whose Actions event policies do not allow `pull_request_target` for `nightbot-events.yml` (Setting it up, step 4) |
 | a run failed | the `nightbot-run` run linked from the bot's comment; its `work` artifact holds `result.json` and the change's bundle |
 | a pull request sits in the merge queue and never merges | your CI must run on `merge_group`; `nightbot doctor` says whether it does |
 | a provider is "parked" | its subscription refused for usage limits; it starts again at the reset time it gave (or after `park_minutes`) |
