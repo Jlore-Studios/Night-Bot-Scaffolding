@@ -90,7 +90,7 @@ branch="$(git -C "$target" symbolic-ref --quiet --short refs/remotes/origin/HEAD
 [ -n "$branch" ] || branch=main
 
 files=(.nightbot .github/actions/nightbot .github/workflows/nightbot-events.yml
-  .github/workflows/nightbot-run.yml .github/workflows/nightbot-selftest.yml)
+  .github/workflows/nightbot-run.yml .github/workflows/nightbot-selftest.yml .github/workflows/nightbot-setup.yml)
 if [ "$plan_gate" = true ]; then files+=(.github/ISSUE_TEMPLATE/nightbot-request.yml); fi
 for f in "${files[@]}"; do
   if [ -e "$target/$f" ] && [ "$mode" != force ]; then
@@ -144,7 +144,8 @@ Next (README.md, "Quick start", has the details):
   2. .nightbot/providers.json: enable the subscriptions you have.
   3. Secrets: NIGHTBOT_GITHUB_TOKEN (or a GitHub App: the variable NIGHTBOT_APP_ID and the secret
      NIGHTBOT_APP_PRIVATE_KEY), and each enabled provider's login secret.
-  4. Commit and push, then once, with an admin token:
+  4. Commit and push, then run the nightbot-setup workflow from the Actions tab (it uses the bot's
+     token from your secrets), or once, with an admin token:
        cd .nightbot/harness && GITHUB_TOKEN=\$(gh auth token) go run ./cmd/nightbot setup --repo-settings
      On a public repository, also allow pull_request_target for .github/workflows/nightbot-events.yml
      alone in the Actions event policies: GitHub blocks it there by default from 2026-12-02.
