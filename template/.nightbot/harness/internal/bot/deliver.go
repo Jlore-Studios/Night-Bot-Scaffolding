@@ -55,6 +55,8 @@ func (b *Bot) Deliver(p *job.Plan, out, workStatus string) (err error) {
 		return b.deliverTriage(p, r)
 	case sched.Review:
 		return b.deliverAudit(p, r)
+	case sched.Plan:
+		return b.deliverPlan(p, r)
 	}
 	return b.deliverChange(p, r, out)
 }
@@ -167,7 +169,7 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 		b.fail(p.Number, "the model job left no change to deliver")
 		return nil
 	}
-	if p.Action == sched.Revise && p.PR != 0 {
+	if p.Action == sched.Revise && p.PR != 0 && !b.Cfg.Forked() {
 		// The change on the pull request is about to be one no review has seen: auto-merge goes
 		// off first, and only a new approval of the new head turns it on again.
 		if current, err := b.GH.GetPR(p.PR); err == nil {
@@ -188,6 +190,9 @@ func (b *Bot) deliverChange(p *job.Plan, r *job.Result, out string) error {
 	if r.Outcome == job.RateLimited {
 		b.logf("pushed the work so far on %s; the item stays queued", p.Branch)
 		return nil // the next run carries the branch on
+	}
+	if b.Cfg.Forked() {
+		return b.deliverForked(p, r, head)
 	}
 
 	issue, pr := p.Number, p.PR
@@ -269,6 +274,15 @@ func (b *Bot) repo() *gitx.Repo {
 	return &gitx.Repo{Dir: b.Workspace, Env: gitx.AuthEnv(os.Getenv("GITHUB_SERVER_URL"), Token())}
 }
 
+// remotes are where the base branch and the bot's branches are in the deliver job's checkout:
+// both origin, or in fork mode the upstream repository and the fork.
+func (b *Bot) remotes() (base, push string) {
+	if b.Cfg.Forked() {
+		return "origin", "fork"
+	}
+	return "origin", "origin"
+}
+
 // refusal is a change deliver will not push.
 type refusal struct{ why string }
 
@@ -288,9 +302,10 @@ func (b *Bot) push(p *job.Plan, r *job.Result, out string) (string, []string, er
 
 func (b *Bot) pushBundle(p *job.Plan, r *job.Result, out string) (string, []string, error) {
 	repo := b.repo()
+	baseRemote, pushRemote := b.remotes()
 	bundle := filepath.Join(out, filepath.Base(r.Bundle))
 	incoming := "refs/nightbot/incoming"
-	if _, err := repo.Git("fetch", "-q", "origin", p.Base); err != nil {
+	if _, err := repo.Git("fetch", "-q", baseRemote, p.Base); err != nil {
 		return "", nil, err
 	}
 	if _, err := repo.Git("bundle", "verify", "-q", bundle); err != nil {
@@ -303,7 +318,7 @@ func (b *Bot) pushBundle(p *job.Plan, r *job.Result, out string) (string, []stri
 	if err != nil {
 		return "", nil, err
 	}
-	base, err := repo.Git("merge-base", "origin/"+p.Base, incoming)
+	base, err := repo.Git("merge-base", baseRemote+"/"+p.Base, incoming)
 	if err != nil {
 		return "", nil, &refusal{"the change shares no history with " + p.Base}
 	}
@@ -321,9 +336,9 @@ func (b *Bot) pushBundle(p *job.Plan, r *job.Result, out string) (string, []stri
 		return "", nil, &refusal{"the change touches forbidden paths, so I pushed nothing: " + strings.Join(forbidden, ", ")}
 	}
 	lease := "--force-with-lease=refs/heads/" + p.Branch + ":"
-	if remote, err := repo.Git("ls-remote", "origin", "refs/heads/"+p.Branch); err == nil && remote != "" {
+	if remote, err := repo.Git("ls-remote", pushRemote, "refs/heads/"+p.Branch); err == nil && remote != "" {
 		sha := strings.Fields(remote)[0]
-		if _, err := repo.Git("fetch", "-q", "origin", sha); err != nil {
+		if _, err := repo.Git("fetch", "-q", pushRemote, sha); err != nil {
 			return "", nil, err
 		}
 		if _, err := repo.Git("merge-base", "--is-ancestor", sha, incoming); err != nil {
@@ -335,7 +350,7 @@ func (b *Bot) pushBundle(p *job.Plan, r *job.Result, out string) (string, []stri
 		b.logf("dry run: push %.12s to %s", head, p.Branch)
 		return head, changed, nil
 	}
-	if _, err := repo.Git("push", "-q", lease, "origin", incoming+":refs/heads/"+p.Branch); err != nil {
+	if _, err := repo.Git("push", "-q", lease, pushRemote, incoming+":refs/heads/"+p.Branch); err != nil {
 		return "", nil, err
 	}
 	b.logf("pushed %.12s to %s", head, p.Branch)

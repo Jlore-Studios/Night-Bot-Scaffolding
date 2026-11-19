@@ -97,3 +97,11 @@ run never holds an item for good. Editing the file by hand is safe while no run 
 | (the sweep) the bot's pull request conflicts with the default branch | a revision that merges the default branch in, the model resolving the conflicts |
 | the bot's pull request closes | the item's memory cleared; merged ones go in the history |
 | the schedule | the sweep |
+
+## Fork mode and the plan gate
+
+With `plan_gate`, every item is planned first and built only once an approver approves the plan.
+In fork mode the repository the bot is installed in holds the queue, and the bot builds on its
+fork of another repository: its changes go through the fork's CI into a sandbox, then upstream
+for a person to merge, and the sweep follows each upstream pull request, since that repository
+sends this one no events. [`fork-mode.md`](fork-mode.md) has the whole flow.

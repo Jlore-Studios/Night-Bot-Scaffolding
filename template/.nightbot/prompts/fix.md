@@ -20,6 +20,8 @@ You are changing the work on the branch `{{.branch}}` (it starts from `{{.base}}
 
 {{.thread}}
 
+{{.plan}}
+
 ## How to work
 
 - Address every point above, each in the smallest change that fixes its cause. A finding you are

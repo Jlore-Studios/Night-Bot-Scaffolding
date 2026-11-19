@@ -38,7 +38,11 @@ case "$prompt" in
       echo '{"verdict": "approve", "summary": "It does what the issue asks.", "findings": []}'
     fi
     echo "stray" > review-scratch.txt ;;
+  *"# Plan "*)
+    echo "$prompt" > "$FAKE_DIR/plan-prompt"
+    printf '## Summary\nAdd hello.txt.\n\n## Steps\n1. Write hello.txt.\n' ;;
   *"# Build "*)
+    echo "$prompt" > "$FAKE_DIR/build-prompt"
     echo hello > hello.txt
     mkdir -p .github/workflows && echo evil > .github/workflows/evil.yml
     echo evil > ".github/workflows/café.yml"
@@ -53,6 +57,7 @@ case "$prompt" in
     printf 'hello from the branch and from main\n' > hello.txt
     echo "Resolved the conflict in hello.txt." ;;
   *"# Revise "*)
+    echo "$prompt" > "$FAKE_DIR/revise-prompt"
     echo fixed >> hello.txt
     echo "Fixed what was asked." ;;
   *"# A question"*)

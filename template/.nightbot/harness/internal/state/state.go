@@ -30,6 +30,22 @@ type State struct {
 	History   []*Entry                `json:"history,omitempty"`
 	Handled   []int64                 `json:"handled,omitempty"` // comment and review ids answered
 	Secrets   []string                `json:"secrets,omitempty"` // which provider secrets were set, last seen
+	// Linked is fork mode's upstream issues and the item here that took each one up, kept after
+	// the item ends, so an issue is taken up by itself only once.
+	Linked map[string]int `json:"linked,omitempty"`
+	// Shipped is the bot's pull requests a person merged upstream, for the status issue.
+	Shipped []*Shipped `json:"shipped,omitempty"`
+	// Sandbox is what the last sync of the fork's sandbox branch did.
+	Sandbox string `json:"sandbox,omitempty"`
+}
+
+// Shipped is one change merged upstream.
+type Shipped struct {
+	At     time.Time `json:"at"`
+	Issue  int       `json:"issue"`
+	PR     int       `json:"pr"`
+	Title  string    `json:"title"`
+	Builds int       `json:"builds"`
 }
 
 // Claim is an item a run holds.
@@ -64,6 +80,56 @@ type Item struct {
 	Audits       int      `json:"audits,omitempty"`
 	LastProvider string   `json:"last_provider,omitempty"`
 	Builders     []string `json:"builders,omitempty"`
+
+	// The plan gate: the plan's pull request here, and the plan a person approved.
+	PlanPR       int       `json:"plan_pr,omitempty"`
+	PlanBranch   string    `json:"plan_branch,omitempty"`
+	PlanPath     string    `json:"plan_path,omitempty"`
+	Plan         string    `json:"plan,omitempty"`
+	ApprovedPlan string    `json:"approved_plan,omitempty"`
+	ApprovedBy   string    `json:"approved_by,omitempty"`
+	ApprovedAt   time.Time `json:"approved_at,omitzero"`
+
+	// Fork mode: where the item came from, and its pull requests on the fork and upstream.
+	Intake        string    `json:"intake,omitempty"`
+	UpstreamIssue int       `json:"upstream_issue,omitempty"`
+	ForkPR        int       `json:"fork_pr,omitempty"`
+	ForkMerged    bool      `json:"fork_merged,omitempty"`
+	ForkSkipped   string    `json:"fork_skipped,omitempty"` // why the sandbox merge was passed over
+	ApprovedHead  string    `json:"approved_head,omitempty"`
+	UpstreamPR    int       `json:"upstream_pr,omitempty"`
+	CIHead        string    `json:"ci_head,omitempty"` // the head whose red CI was queued for a fix
+	CIRepo        string    `json:"ci_repo,omitempty"` // fork or upstream
+	CIJobs        []int64   `json:"ci_jobs,omitempty"` // the failed checks' job ids, for their logs
+	Ready         bool      `json:"ready,omitempty"`   // the upstream pull request asked for review
+	Stage         string    `json:"stage,omitempty"`
+	Waiting       string    `json:"waiting,omitempty"`  // what it waits on, as the sweep last saw it
+	Since         time.Time `json:"since,omitzero"`     // when it entered its stage
+	HeadSeen      time.Time `json:"head_seen,omitzero"` // when the sweep first saw the head it waits on
+	HeadSeenSHA   string    `json:"head_seen_sha,omitempty"`
+}
+
+// Stages an item passes through in fork mode and with the plan gate, for the status issue.
+const (
+	StagePlanning = "planning"
+	StageApproval = "awaiting approval"
+	StageApproved = "approved"
+	StageBuilding = "building"
+	StageForkCI   = "fork CI"
+	StageHeld     = "held in the fork"
+	StageUpstream = "upstream CI"
+	StageInReview = "in review"
+	StageRevising = "revising"
+	StageHuman    = "with a person"
+	StageMerged   = "merged"
+	StageClosed   = "closed"
+)
+
+// SetStage moves an item to a stage, stamping when it got there.
+func (i *Item) SetStage(stage string, now time.Time) {
+	if i.Stage != stage {
+		i.Stage, i.Since = stage, now
+	}
 }
 
 // Query is a question someone asked the bot, waiting for a weak-tier answer.
@@ -93,7 +159,8 @@ type Entry struct {
 // Limits on what the file keeps.
 const (
 	keepHistory = 100
-	keepHandled = 1000
+	keepHandled = 3000
+	keepShipped = 300
 	keepUsage   = 7 * 24 * time.Hour
 )
 
@@ -193,6 +260,25 @@ func (s *State) Prune(now time.Time) {
 		}
 	}
 }
+
+// Ship records a change merged upstream.
+func (s *State) Ship(e *Shipped) {
+	s.Shipped = append(s.Shipped, e)
+	if len(s.Shipped) > keepShipped {
+		s.Shipped = s.Shipped[len(s.Shipped)-keepShipped:]
+	}
+}
+
+// Link records the item that took up an upstream issue.
+func (s *State) Link(upstreamIssue, number int) {
+	if s.Linked == nil {
+		s.Linked = map[string]int{}
+	}
+	s.Linked[Key(upstreamIssue)] = number
+}
+
+// LinkedTo is the item that took up an upstream issue, or 0.
+func (s *State) LinkedTo(upstreamIssue int) int { return s.Linked[Key(upstreamIssue)] }
 
 // Running lists the claims in item order.
 func (s *State) Claims() []*Claim {

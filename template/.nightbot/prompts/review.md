@@ -19,6 +19,8 @@ This is review {{.round}} of at most {{.rounds}}. {{.where}}
 
 {{.thread}}
 
+{{.plan}}
+
 ## What the builder says it did
 
 {{.report}}
@@ -38,7 +40,8 @@ This is review {{.round}} of at most {{.rounds}}. {{.where}}
 ## What to check
 
 1. **The task.** Every requirement is met; name each and where the diff meets it. Something asked
-   for and not done is blocking even if nothing in the diff is wrong.
+   for and not done is blocking even if nothing in the diff is wrong. With an approved plan, the
+   change does what the plan says, or the builder's report says why a step had to differ.
 2. **Correctness.** Wrong logic, missed edge cases, broken error handling, races, data loss,
    behaviour that changed for callers the task did not mention.
 3. **Tests.** New behaviour has tests that would fail without the change; no test was weakened.

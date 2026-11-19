@@ -26,6 +26,8 @@ type REST struct {
 	// DryRun records every write on Log instead of sending it.
 	DryRun bool
 	Log    io.Writer
+	// NoMerge makes MergePR refuse: set on the client for a repository a person merges into.
+	NoMerge bool
 }
 
 // NewREST is a client for repo with token, reading GITHUB_API_URL, GITHUB_GRAPHQL_URL and
@@ -303,9 +305,11 @@ func (c *REST) GetPR(number int) (*PR, error) {
 }
 
 func (c *REST) FindPR(head string) (*PR, error) {
-	owner := strings.SplitN(c.Repo, "/", 2)[0]
+	if !strings.Contains(head, ":") {
+		head = strings.SplitN(c.Repo, "/", 2)[0] + ":" + head
+	}
 	var prs []*PR
-	if _, err := c.do(http.MethodGet, c.repo("/pulls?state=open&head=%s", url.QueryEscape(owner+":"+head)), nil, &prs); err != nil {
+	if _, err := c.do(http.MethodGet, c.repo("/pulls?state=open&head=%s", url.QueryEscape(head)), nil, &prs); err != nil {
 		return nil, err
 	}
 	if len(prs) == 0 {
@@ -532,4 +536,117 @@ func (c *REST) ProtectBranch(branch string, checks []string) error {
 		"restrictions":                  nil,
 	}, nil)
 	return err
+}
+
+func (c *REST) Repository() (*RepoInfo, error) {
+	info := &RepoInfo{}
+	_, err := c.do(http.MethodGet, "/repos/"+c.Repo, nil, info)
+	return info, err
+}
+
+func (c *REST) ListAssigned(login string) ([]*Issue, error) {
+	return list[*Issue](c, c.repo("/issues?state=open&per_page=100&assignee=%s", url.QueryEscape(login)), 5)
+}
+
+func (c *REST) CloseIssue(number int, reason string) error {
+	body := map[string]string{"state": "closed"}
+	if reason != "" {
+		body["state_reason"] = reason
+	}
+	_, err := c.do(http.MethodPatch, c.repo("/issues/%d", number), body, nil)
+	return err
+}
+
+func (c *REST) ClosePR(number int) error {
+	_, err := c.do(http.MethodPatch, c.repo("/pulls/%d", number), map[string]string{"state": "closed"}, nil)
+	return err
+}
+
+func (c *REST) BranchSHA(branch string) (string, error) {
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	_, err := c.do(http.MethodGet, c.repo("/git/ref/heads/%s", branch), nil, &ref)
+	return ref.Object.SHA, err
+}
+
+func (c *REST) CreateBranch(branch, sha string) error {
+	_, err := c.do(http.MethodPost, c.repo("/git/refs"), map[string]string{"ref": "refs/heads/" + branch, "sha": sha}, nil)
+	return err
+}
+
+func (c *REST) ResetBranch(branch, sha string) error {
+	_, err := c.do(http.MethodPatch, c.repo("/git/refs/heads/%s", branch), map[string]any{"sha": sha, "force": true}, nil)
+	return err
+}
+
+func (c *REST) SyncFork(branch string) (string, error) {
+	var out struct {
+		MergeType string `json:"merge_type"`
+	}
+	_, err := c.do(http.MethodPost, c.repo("/merge-upstream"), map[string]string{"branch": branch}, &out)
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == http.StatusConflict {
+		return "", ErrConflict
+	}
+	return out.MergeType, err
+}
+
+// Checks reads a commit's check runs and its commit statuses (the older API some CI uses).
+func (c *REST) Checks(sha string) ([]*CheckRun, error) {
+	var out []*CheckRun
+	for page := 1; page <= 5; page++ {
+		var batch struct {
+			Total int         `json:"total_count"`
+			Runs  []*CheckRun `json:"check_runs"`
+		}
+		if _, err := c.do(http.MethodGet, c.repo("/commits/%s/check-runs?filter=latest&per_page=100&page=%d", sha, page), nil, &batch); err != nil {
+			return nil, err
+		}
+		out = append(out, batch.Runs...)
+		if len(out) >= batch.Total || len(batch.Runs) == 0 {
+			break
+		}
+	}
+	var combined struct {
+		Statuses []struct {
+			Context   string `json:"context"`
+			State     string `json:"state"`
+			TargetURL string `json:"target_url"`
+		} `json:"statuses"`
+	}
+	if _, err := c.do(http.MethodGet, c.repo("/commits/%s/status", sha), nil, &combined); err != nil {
+		return nil, err
+	}
+	for _, s := range combined.Statuses {
+		run := &CheckRun{Name: s.Context, Status: "completed", Conclusion: s.State, HTMLURL: s.TargetURL}
+		if s.State == "pending" {
+			run.Status, run.Conclusion = "in_progress", ""
+		}
+		out = append(out, run)
+	}
+	return out, nil
+}
+
+func (c *REST) MergePR(number int, method, sha string) error {
+	if c.NoMerge {
+		return ErrMergeForbidden
+	}
+	_, err := c.do(http.MethodPut, c.repo("/pulls/%d/merge", number), map[string]string{"merge_method": method, "sha": sha}, nil)
+	return err
+}
+
+func (c *REST) ListReviewComments(number int) ([]*ReviewComment, error) {
+	return list[*ReviewComment](c, c.repo("/pulls/%d/comments?per_page=100", number), 5)
+}
+
+func (c *REST) RequestReviewers(number int, logins []string) error {
+	_, err := c.do(http.MethodPost, c.repo("/pulls/%d/requested_reviewers", number), map[string]any{"reviewers": logins}, nil)
+	return err
+}
+
+func (c *REST) ListOpenPRs() ([]*PR, error) {
+	return list[*PR](c, c.repo("/pulls?state=open&per_page=100"), 10)
 }

@@ -138,6 +138,45 @@ type Job struct {
 	HTMLURL    string `json:"html_url"`
 }
 
+// CheckRun is one check on a commit: a check run, or a commit status (ID 0).
+type CheckRun struct {
+	ID         int64  `json:"id"` // for GitHub Actions, the job's id, whose log JobLog reads
+	Name       string `json:"name"`
+	Status     string `json:"status"`     // queued, in_progress or completed
+	Conclusion string `json:"conclusion"` // success, failure, neutral, cancelled, skipped, timed_out, …
+	HTMLURL    string `json:"html_url"`
+}
+
+// Failed says whether a finished check failed.
+func (c *CheckRun) Failed() bool {
+	switch c.Conclusion {
+	case "failure", "timed_out", "action_required", "startup_failure", "error":
+		return true
+	}
+	return false
+}
+
+// ReviewComment is a comment on a line of a pull request's diff.
+type ReviewComment struct {
+	ID       int64  `json:"id"`
+	Body     string `json:"body"`
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	User     User   `json:"user"`
+	ReviewID int64  `json:"pull_request_review_id"`
+}
+
+// RepoInfo is what the harness reads of a repository itself.
+type RepoInfo struct {
+	FullName            string `json:"full_name"`
+	DefaultBranch       string `json:"default_branch"`
+	DeleteBranchOnMerge bool   `json:"delete_branch_on_merge"`
+	Fork                bool   `json:"fork"`
+	Parent              *struct {
+		FullName string `json:"full_name"`
+	} `json:"parent"`
+}
+
 // Client is what the harness asks of GitHub. Every method acts on the configured repository.
 type Client interface {
 	// Files on a branch, for the state file: Put with the sha read (or "" for a new file)
@@ -162,6 +201,8 @@ type Client interface {
 	EnsureLabel(name, color, description string) error
 
 	GetPR(number int) (*PR, error)
+	// FindPR is the open pull request from a branch: "branch" in this repository, or
+	// "owner:branch" from a fork.
 	FindPR(head string) (*PR, error)
 	CreatePR(head, base, title, body string, draft bool) (*PR, error)
 	UpdatePR(number int, title, body string) error
@@ -188,4 +229,36 @@ type Client interface {
 	Whoami() (string, error)
 	UpdateRepo(settings map[string]any) error
 	ProtectBranch(branch string, checks []string) error
+
+	// For fork mode and the plan gate.
+	Repository() (*RepoInfo, error)
+	// ListAssigned is the open issues assigned to login.
+	ListAssigned(login string) ([]*Issue, error)
+	CloseIssue(number int, reason string) error
+	ClosePR(number int) error
+	// BranchSHA is a branch's head, or ErrNotFound.
+	BranchSHA(branch string) (string, error)
+	CreateBranch(branch, sha string) error
+	// ResetBranch moves a branch to sha even when that is not a fast-forward.
+	ResetBranch(branch, sha string) error
+	// SyncFork merges the parent repository's branch of the same name into a fork's branch and
+	// says how ("fast-forward", "merge" or "none"); ErrConflict when it conflicts.
+	SyncFork(branch string) (string, error)
+	// Checks is every check run and commit status on a commit.
+	Checks(sha string) ([]*CheckRun, error)
+	// MergePR merges a pull request whose head is still sha. A client made for a repository the
+	// bot must never merge into refuses.
+	MergePR(number int, method, sha string) error
+	ListReviewComments(number int) ([]*ReviewComment, error)
+	RequestReviewers(number int, logins []string) error
+	// ListOpenPRs is every open pull request.
+	ListOpenPRs() ([]*PR, error)
 }
+
+// ErrMergeForbidden is a merge asked of a client that may not merge (the upstream repository's).
+var ErrMergeForbidden = errors.New("github: this client never merges")
+
+var (
+	_ Client = (*REST)(nil)
+	_ Client = (*Fake)(nil)
+)

@@ -32,8 +32,11 @@ Run in the repository (or below it). Commands:
   sweep                    release lost claims, start runs for free lanes, redraw the status issue
   plan --out FILE [--item N] [--mode M] [--force]   claim the next item (the run's plan job)
   install --plan FILE      install the plan's CLI on a GitHub-hosted runner
-  work --plan FILE --out DIR                        the model job: no GitHub writes
-  deliver --plan FILE --out DIR [--work-status S]   push, open pull requests, comment
+  work --plan FILE --out DIR [--product DIR]        the model job: no GitHub writes
+  deliver --plan FILE --out DIR [--work-status S] [--product DIR]   push, open pull requests, comment
+
+In fork mode (config.json "upstream"), --product is the clone of the upstream repository the
+model works in and deliver pushes from: origin the upstream repository, "fork" the bot's fork.
   status                   print the status
   providers [--offline]    print the providers and whether each can start work
 
@@ -72,7 +75,8 @@ func runCommand(cfg *config.Config, command string, args []string, stdout, stder
 	planFile := flags.String("plan", "", "the plan file")
 	out := flags.String("out", "", "the output file or directory")
 	item := flags.Int("item", 0, "one issue or pull request")
-	mode := flags.String("mode", "auto", "one action: auto, build, revise, review, ask, triage")
+	mode := flags.String("mode", "auto", "one action: auto, plan, build, revise, review, ask, triage")
+	product := flags.String("product", "", "fork mode: the clone of the upstream repository")
 	force := flags.Bool("force", false, "outside the providers' hours")
 	repoSettings := flags.Bool("repo-settings", false, "also change the repository's settings")
 	workStatus := flags.String("work-status", "", "the model job's result")
@@ -107,7 +111,7 @@ func runCommand(cfg *config.Config, command string, args []string, stdout, stder
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 		return cmd.Run()
 	case "work":
-		return doWork(cfg, *planFile, *out, stderr)
+		return doWork(cfg, *planFile, *out, *product, stderr)
 	case "providers":
 		if *offline {
 			for _, p := range cfg.Providers.Ordered() {
@@ -187,6 +191,12 @@ func runCommand(cfg *config.Config, command string, args []string, stdout, stder
 		if err != nil {
 			return err
 		}
+		if cfg.Forked() {
+			if *product == "" {
+				return fmt.Errorf("fork mode: deliver needs --product, the clone it pushes to the fork from")
+			}
+			b.Workspace = *product
+		}
 		return b.Deliver(p, *out, *workStatus)
 	}
 	return fmt.Errorf("unknown command %q (nightbot --help lists them)", command)
@@ -206,14 +216,21 @@ func newBot(cfg *config.Config) *bot.Bot {
 	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
 		actions = github.NewREST(cfg.Repo, t)
 	}
-	return bot.New(cfg, gh, actions)
+	b := bot.New(cfg, gh, actions)
+	if cfg.Forked() {
+		b.Fork = github.NewREST(cfg.Upstream.Fork, bot.Token())
+		upstream := github.NewREST(cfg.Upstream.Repo, bot.Token())
+		upstream.NoMerge = true // a person merges upstream (gate 2)
+		b.Upstream = upstream
+	}
+	return b
 }
 
 // writeOutputs appends the job's outputs to GITHUB_OUTPUT, or prints them outside Actions.
 func writeOutputs(outputs map[string]string) error {
 	path := os.Getenv("GITHUB_OUTPUT")
 	var lines []string
-	for _, k := range []string{"action", "number", "provider", "runs_on", "secret", "cli", "hosted", "install"} {
+	for _, k := range []string{"action", "number", "provider", "runs_on", "secret", "cli", "hosted", "install", "product", "fork"} {
 		if v, ok := outputs[k]; ok {
 			lines = append(lines, k+"="+strings.ReplaceAll(v, "\n", " "))
 		}
@@ -233,7 +250,7 @@ func writeOutputs(outputs map[string]string) error {
 
 // doWork is the model job. It checks the plan against providers.json before it touches the
 // secret, so a plan cannot send a login to a runner its provider does not name.
-func doWork(cfg *config.Config, planFile, out string, log io.Writer) error {
+func doWork(cfg *config.Config, planFile, out, product string, log io.Writer) error {
 	p, err := readPlan(planFile)
 	if err != nil {
 		return err
@@ -278,7 +295,15 @@ func doWork(cfg *config.Config, planFile, out string, log io.Writer) error {
 	w := &work.Worker{Cfg: cfg, Plan: p, Out: out, Repo: &gitx.Repo{Dir: cfg.Root}, Auth: auth, Log: log,
 		Runner:   &model.Runner{Name: p.CLI, CLI: cfg.CLIs[p.CLI], Secret: secret, TempDir: temp, Location: cfg.Location},
 		Deadline: time.Now().Add(time.Duration(cfg.JobBudgetMinutes) * time.Minute)}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if cfg.Forked() {
+		// The product is public: its fetches need no token, and the run's token is this
+		// repository's alone. The plan job read any CI logs a fix needs, with the bot's token.
+		if product == "" {
+			return fmt.Errorf("fork mode: work needs --product, the clone of %s", cfg.Upstream.Repo)
+		}
+		w.Repo, w.Auth = &gitx.Repo{Dir: product}, &gitx.Repo{Dir: product}
+		w.BaseRemote, w.BranchRemote = "origin", "fork"
+	} else if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		w.CI = ciLogs{github.NewREST(cfg.Repo, token)}
 	}
 	os.Unsetenv("GITHUB_TOKEN")

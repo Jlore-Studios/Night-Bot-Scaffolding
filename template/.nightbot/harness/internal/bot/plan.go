@@ -109,13 +109,31 @@ func (b *Bot) planFor(st *state.State, as *sched.Assignment) *job.Plan {
 	if p.ReviewRounds == 0 {
 		p.ReviewRounds = b.Cfg.ReviewRounds["medium"]
 	}
+	if u := b.Cfg.Upstream; b.Cfg.Forked() {
+		p.Upstream, p.Fork, p.Base = u.Repo, u.Fork, u.DefaultBranch
+	}
 	if mem := st.Peek(it.Number); mem != nil {
 		p.Issue = mem.Issue
 		p.Branch = mem.Branch
-		if it.Action == sched.Revise {
+		p.UpstreamIssue = mem.UpstreamIssue
+		switch it.Action {
+		case sched.Revise:
 			p.Request = strings.Join(mem.Notes, "\n\n")
 			p.CIRun = mem.CIRun
 			p.MergeBase = mem.MergeMain
+			p.CIRepo, p.CIJobs = mem.CIRepo, mem.CIJobs
+			p.PlanText = mem.ApprovedPlan
+			if b.Cfg.Forked() {
+				p.PR = mem.UpstreamPR
+				if p.PR == 0 {
+					p.PR = mem.ForkPR
+				}
+			}
+		case sched.Plan:
+			p.Request = strings.Join(mem.Notes, "\n\n")
+			p.PlanText = mem.Plan
+		case sched.Build:
+			p.PlanText = mem.ApprovedPlan
 		}
 	}
 	switch it.Action {
@@ -124,8 +142,15 @@ func (b *Bot) planFor(st *state.State, as *sched.Assignment) *job.Plan {
 		p.Branch = fmt.Sprintf("%sask-%s", b.Cfg.BranchPrefix, it.Query.ID)
 	case sched.Triage:
 		p.Branch = fmt.Sprintf("%striage-%d", b.Cfg.BranchPrefix, it.Number)
+	case sched.Plan:
+		p.Branch = b.planBranch(it.Number) // here, for the plan's pull request; the work job pushes nothing
 	}
 	return p
+}
+
+// planBranch is the branch of an item's plan in this repository.
+func (b *Bot) planBranch(number int) string {
+	return fmt.Sprintf("%splan-%d", b.Cfg.BranchPrefix, number)
 }
 
 // fill reads the item's text, and its branch for builds, from GitHub.
@@ -147,18 +172,28 @@ func (b *Bot) fill(p *job.Plan) error {
 			}
 		}
 	}
+	if p.UpstreamIssue != 0 && b.Upstream != nil {
+		upstream, err := b.upstreamThread(p.UpstreamIssue)
+		if err != nil {
+			return err
+		}
+		thread += "\n\n" + upstream
+	}
 	p.Thread = prompts.Truncate(thread, threadLimit)
 	switch p.Action {
 	case sched.Build:
 		if p.Branch == "" {
 			p.Branch = b.BranchFor(p.Number, p.Title)
 		}
-		exists, err := b.GH.BranchExists(p.Branch)
+		exists, err := b.workGH().BranchExists(p.Branch)
 		if err != nil {
 			return err
 		}
 		p.Continue = exists
 	case sched.Revise:
+		if b.Cfg.Forked() {
+			return b.fillForkRevision(p)
+		}
 		pr, err := b.GH.GetPR(p.Number)
 		if err != nil {
 			return err
@@ -174,7 +209,12 @@ func (b *Bot) fill(p *job.Plan) error {
 		}
 		p.PR, p.Head, p.Untrusted = pr.Number, pr.Head.SHA, !b.trustedPR(pr)
 		p.Branch = fmt.Sprintf("%sreview-%d", b.Cfg.BranchPrefix, pr.Number) // local only, never pushed
+	case sched.Plan:
+		b.fillPlan(p)
 	case sched.Ask:
+		if p.IsPR && b.Cfg.Forked() {
+			p.IsPR = false // the question is about the product's code, not this pull request's
+		}
 		if p.IsPR {
 			pr, err := b.GH.GetPR(p.Number)
 			if err != nil {
@@ -255,5 +295,6 @@ func Outputs(cfg *config.Config, p *job.Plan) map[string]string {
 	cli := cfg.CLIs[p.CLI]
 	return map[string]string{"action": p.Action, "number": fmt.Sprint(p.Number), "provider": p.Provider,
 		"runs_on": p.RunsOn, "secret": p.Secret, "cli": p.CLI,
-		"hosted": fmt.Sprint(config.GitHubHosted(p.RunsOn)), "install": cli.Install}
+		"hosted": fmt.Sprint(config.GitHubHosted(p.RunsOn)), "install": cli.Install,
+		"product": p.Upstream, "fork": p.Fork}
 }

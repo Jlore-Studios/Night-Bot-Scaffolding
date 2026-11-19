@@ -44,6 +44,9 @@ func (t Templates) Render(cfg *config.Config, name string, vars map[string]strin
 	}
 	data := map[string]string{"repo": cfg.Repo, "default_branch": cfg.DefaultBranch,
 		"bot_login": cfg.BotLogin, "command_prefix": cfg.CommandPrefix}
+	if cfg.Forked() { // the model works on the product, not on the repository that queues it
+		data["repo"], data["default_branch"] = cfg.Upstream.Repo, cfg.Upstream.DefaultBranch
+	}
 	for k, v := range vars {
 		data[k] = v
 	}

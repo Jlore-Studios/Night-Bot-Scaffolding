@@ -50,11 +50,15 @@
     "**/migrations/**"
   ],
 
-  "max_turns": { "build": 300, "fix": 200, "review": 100, "ask": 40, "triage": 30 },
+  "max_turns": { "build": 300, "fix": 200, "review": 100, "ask": 40, "triage": 30, "plan": 150 },
   "call_timeout_minutes": 120,
   "job_budget_minutes": 300,
   "park_minutes": 60,
   "max_diff_chars": 60000,
+
+  "plan_gate": false,
+  "approvers": [],
+  "upstream": null,
 
   "clis": {}
 }

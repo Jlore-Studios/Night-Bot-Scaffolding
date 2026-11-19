@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nightbot/internal/config"
 	"nightbot/internal/github"
 	"nightbot/internal/state"
 )
@@ -209,12 +210,36 @@ func (b *Bot) run(c Command, number int, isPR bool, commentID int64, author stri
 			return b.queueRevision(number, author, c.Text)
 		}
 		return b.queueQuestion(number, isPR, commentID, author, c.Text)
+	case "approve":
+		return b.approve(number, author)
+	case "reject":
+		return b.reject(number, author, c.Text)
+	case "plan":
+		if !b.Cfg.PlanGate {
+			return "There is no plan gate here: `" + p + " build` builds.", false
+		}
+		return b.queuePlan(number, isPR, c.Text)
 	case "revise":
+		if b.Cfg.PlanGate {
+			if reply, start, handled := b.revisePlan(number, author, c.Text); handled {
+				return reply, start
+			}
+		}
+		if b.Cfg.Forked() && !isPR {
+			return b.reviseForked(number, author, c.Text)
+		}
 		if !isPR || !b.isBotPR(number) {
 			return "`revise` works on my own pull requests; on an issue, use `" + p + " build`.", false
 		}
 		return b.queueRevision(number, author, c.Text)
 	case "build":
+		if b.Cfg.PlanGate && !isPR {
+			if st, _, err := b.Store.Load(); err == nil {
+				if mem := st.Peek(number); mem == nil || mem.ApprovedPlan == "" {
+					return b.queuePlan(number, false, c.Text)
+				}
+			}
+		}
 		if isPR {
 			if !b.isBotPR(number) {
 				return "I only build issues and revise my own pull requests; `" + p + " review` reviews this one.", false
@@ -225,6 +250,9 @@ func (b *Bot) run(c Command, number int, isPR bool, commentID int64, author stri
 	case "review":
 		if !isPR {
 			return "`review` works on pull requests.", false
+		}
+		if b.Cfg.Forked() {
+			return "In fork mode every build and revision is reviewed already; `" + p + " ask` asks about the code.", false
 		}
 		if err := b.GH.AddLabels(number, b.Cfg.Label("review")); err != nil {
 			return "I could not queue the review: " + err.Error(), false
@@ -289,19 +317,46 @@ func (b *Bot) run(c Command, number int, isPR bool, commentID int64, author stri
 
 func (b *Bot) help() string {
 	p := b.Cfg.CommandPrefix
-	return strings.Join([]string{
-		"| Command | What it does |", "|---|---|",
-		"| `" + p + " build [--force]` | queue this issue (`--force`: start now, outside the providers' hours) |",
-		"| `" + p + " ask <question>`, or `@" + strings.TrimSuffix(b.Cfg.BotLogin, "[bot]") + " <question>` | a question, answered by the cheapest model free (a weak one first) |",
-		"| `" + p + " revise <change>`, or a mention on my pull request | change my pull request |",
-		"| `" + p + " review [--force]` | an adversarial review of a pull request |",
-		"| `" + p + " stop` | stop work on this item |",
-		"| `" + p + " rebuild` | start this item over from the default branch |",
-		"| `" + p + " forget` | forget this item's failures |",
-		"| `" + p + " status` | what runs, the providers and the queue |",
-		"| `" + p + " halt` / `start` | stop or restart every new run |",
-		"| `" + p + " suspend <provider> [why]` / `resume <provider>` | stop or restart one provider |",
-	}, "\n")
+	var gate []string
+	if b.Cfg.PlanGate {
+		gate = []string{
+			"| `" + p + " plan` | write a plan for this issue, for an approver to approve (also what `build` does before one is approved) |",
+			"| `" + p + " approve` | approve the plan, on its pull request or the issue (approvers: " + b.Cfg.ApproverList() + ") |",
+			"| `" + p + " reject [why]` | turn the plan down |",
+			"| `" + p + " revise <change>` | rewrite a plan that waits for approval, or change the work once it is built |",
+		}
+	}
+	rows := append([]string{"| Command | What it does |", "|---|---|"}, gate...)
+	rows = append(rows,
+		"| `"+p+" build [--force]` | queue this issue (`--force`: start now, outside the providers' hours) |",
+		"| `"+p+" ask <question>`, or `@"+strings.TrimSuffix(b.Cfg.BotLogin, "[bot]")+" <question>` | a question, answered by the cheapest model free (a weak one first) |",
+		"| `"+p+" revise <change>`, or a mention on my pull request | change my pull request |",
+		"| `"+p+" review [--force]` | an adversarial review of a pull request |",
+		"| `"+p+" stop` | stop work on this item |",
+		"| `"+p+" rebuild` | start this item over from the default branch |",
+		"| `"+p+" forget` | forget this item's failures |",
+		"| `"+p+" status` | what runs, the providers and the queue |",
+		"| `"+p+" halt` / `start` | stop or restart every new run |",
+		"| `"+p+" suspend <provider> [why]` / `resume <provider>` | stop or restart one provider |",
+	)
+	return strings.Join(rows, "\n")
+}
+
+// reviseForked queues a revision of an item's work on the fork, asked for on its issue.
+func (b *Bot) reviseForked(number int, author, text string) (string, bool) {
+	st, _, err := b.Store.Load()
+	if err != nil {
+		return "I could not read my state: " + err.Error(), false
+	}
+	mem := st.Peek(number)
+	if mem == nil || mem.Branch == "" {
+		return "Nothing is built for this yet.", false
+	}
+	if strings.TrimSpace(text) == "" {
+		return "What should change? `" + b.Cfg.CommandPrefix + " revise <what to change>`", false
+	}
+	b.queueForkRevision(number, "@"+author+" asked: "+text, false)
+	return "Queued a revision.", true
 }
 
 // isBotPR says whether a pull request is the bot's own: its label, and a branch of its own here.
@@ -382,10 +437,14 @@ func (b *Bot) position(number int) string {
 	return ""
 }
 
-// stop takes an item out of the queue and cancels the run that holds it.
+// stop takes an item out of the queue and cancels the run that holds it. In fork mode it also
+// keeps the sweep off the item's pull requests.
 func (b *Bot) stop(number int) string {
-	for _, name := range []string{"build", "revise", "review", "building"} {
+	for _, name := range []string{"build", "revise", "review", "building", "plan"} {
 		b.GH.RemoveLabel(number, b.Cfg.Label(name))
+	}
+	if b.Cfg.Forked() {
+		b.forkStop(number)
 	}
 	var cancel []int64
 	b.Store.Update(fmt.Sprintf("stop #%d", number), func(s *state.State) error {
@@ -412,15 +471,22 @@ func (b *Bot) stop(number int) string {
 			b.logf("cancel run %d: %v", id, err)
 		}
 	}
-	if len(cancel) > 0 {
-		return "Stopped, and cancelled the run that held it."
+	again := ""
+	if b.Cfg.Forked() {
+		again = " It carries `human` now: take that off and comment `" + b.Cfg.CommandPrefix + " revise` or `build` to carry on."
 	}
-	return "Stopped: it is out of the queue."
+	if len(cancel) > 0 {
+		return "Stopped, and cancelled the run that held it." + again
+	}
+	return "Stopped: it is out of the queue." + again
 }
 
 // rebuild starts an item over: its branch deleted (which closes its pull request), its memory
 // cleared, the issue queued again.
 func (b *Bot) rebuild(number int, isPR bool) (string, bool) {
+	if b.Cfg.Forked() {
+		return b.forkRebuild(number)
+	}
 	issue := number
 	st, _, err := b.Store.Load()
 	if err != nil {
@@ -468,6 +534,25 @@ func (b *Bot) onReview(ev *Event) error {
 	if ev.Action != "submitted" || b.isBot(r.User.Login) {
 		return nil
 	}
+	if strings.EqualFold(r.State, "approved") && hasLabel(pr.Labels, b.Cfg.Label("plan-pr")) && b.Cfg.PlanGate {
+		if !b.Trusted(r.User.Login, r.AuthorAssociation) {
+			return nil
+		}
+		handled := false
+		if _, err := b.Store.Update(fmt.Sprintf("review %d", r.ID), func(s *state.State) error {
+			handled = s.WasHandled(-r.ID)
+			s.MarkHandled(-r.ID)
+			return nil
+		}); err != nil || handled {
+			return err
+		}
+		reply, start := b.approve(pr.Number, r.User.Login)
+		b.say(pr.Number, b.mention(r.User.Login)+reply)
+		if start {
+			b.Kick()
+		}
+		return nil
+	}
 	if !strings.EqualFold(r.State, "changes_requested") || !hasLabel(pr.Labels, b.Cfg.Label("pr")) {
 		return b.onComment(pr.Number, true, -r.ID, false, r.User.Login, r.AuthorAssociation, r.Body)
 	}
@@ -485,6 +570,21 @@ func (b *Bot) onReview(ev *Event) error {
 
 func (b *Bot) onIssueEvent(ev *Event) error {
 	switch {
+	case b.Cfg.PlanGate && ev.Issue != nil && !ev.Issue.IsPR() && !b.isBot(ev.Sender.Login) &&
+		((ev.Action == "opened" && ev.Issue.HasLabel(config.Requested)) ||
+			(ev.Action == "labeled" && ev.Label != nil && ev.Label.Name == config.Requested)):
+		return b.onRequested(ev)
+	case b.Cfg.PlanGate && ev.Action == "closed" && ev.PullRequest != nil && !ev.PullRequest.Merged &&
+		hasLabel(ev.PullRequest.Labels, b.Cfg.Label("plan-pr")) && !b.isBot(ev.Sender.Login):
+		st, _, err := b.Store.Load()
+		if err != nil {
+			return err
+		}
+		if issue, mem := b.planItem(st, ev.PullRequest.Number); mem != nil && mem.PlanPR == ev.PullRequest.Number &&
+			mem.ApprovedPlan == "" && mem.Stage != state.StageClosed {
+			b.turnDown(issue, mem.PlanPR, "@"+ev.Sender.Login, "they closed the plan's pull request")
+		}
+		return nil
 	case ev.Action == "labeled" && ev.Label != nil && ev.Issue != nil && ev.Label.Name == b.Cfg.Label("build"):
 		if b.isBot(ev.Sender.Login) || ev.Issue.IsPR() {
 			return nil
@@ -525,6 +625,32 @@ func (b *Bot) onIssueEvent(ev *Event) error {
 			return nil
 		})
 		return err
+	}
+	return nil
+}
+
+// onRequested takes up an issue a person opened from the request template (it carries
+// `requested`), or labelled so: a trusted person's is queued to be planned.
+func (b *Bot) onRequested(ev *Event) error {
+	issue, err := b.GH.GetIssue(ev.Issue.Number)
+	if err != nil {
+		return err
+	}
+	if issue.HasLabel(b.Cfg.Label("plan")) || issue.HasLabel(b.Cfg.Label("awaiting-approval")) || issue.HasLabel("human") {
+		return nil
+	}
+	trusted := b.Trusted(issue.User.Login, issue.AuthorAssociation) // opened: the sender is the author
+	if ev.Action == "labeled" {
+		trusted = b.Trusted(ev.Sender.Login, "")
+	}
+	if !trusted {
+		b.say(issue.Number, fmt.Sprintf("Thanks. Someone on the trust list queues this by commenting `%s plan` on it.", b.Cfg.CommandPrefix))
+		return nil
+	}
+	reply, start := b.intake(issue, config.Requested, "")
+	b.say(issue.Number, b.mention(ev.Sender.Login)+reply)
+	if start {
+		b.Kick()
 	}
 	return nil
 }

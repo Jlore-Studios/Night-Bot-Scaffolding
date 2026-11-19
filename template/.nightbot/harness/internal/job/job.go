@@ -37,19 +37,28 @@ type Plan struct {
 	MergeBase bool `json:"merge_base,omitempty"`
 	// Untrusted is a pull request from another repository or a person off the trust list: it is
 	// reviewed (or asked about) from its diff alone, never checked out, built or run.
-	Untrusted    bool      `json:"untrusted,omitempty"`
-	PR           int       `json:"pr,omitempty"`
-	Head         string    `json:"head,omitempty"`    // a pull request's head when planned: what an audit reviews
-	Thread       string    `json:"thread"`            // the item and its trusted comments
-	Request      string    `json:"request,omitempty"` // what a revision must change, or the question
-	CIRun        int64     `json:"ci_run,omitempty"`
-	QueryID      string    `json:"query_id,omitempty"`
-	CommentID    int64     `json:"comment_id,omitempty"`
-	Asker        string    `json:"asker,omitempty"`
-	ReviewRounds int       `json:"review_rounds"`
-	RunID        int64     `json:"run_id,omitempty"`
-	RunURL       string    `json:"run_url,omitempty"`
-	Created      time.Time `json:"created"`
+	Untrusted    bool   `json:"untrusted,omitempty"`
+	PR           int    `json:"pr,omitempty"`
+	Head         string `json:"head,omitempty"`    // a pull request's head when planned: what an audit reviews
+	Thread       string `json:"thread"`            // the item and its trusted comments
+	Request      string `json:"request,omitempty"` // what a revision must change, or the question
+	CIRun        int64  `json:"ci_run,omitempty"`
+	QueryID      string `json:"query_id,omitempty"`
+	CommentID    int64  `json:"comment_id,omitempty"`
+	Asker        string `json:"asker,omitempty"`
+	ReviewRounds int    `json:"review_rounds"`
+	// PlanText is the approved plan a build follows, or the plan a re-plan rewrites.
+	PlanText string `json:"plan_text,omitempty"`
+	// Upstream and Fork are set in fork mode: the work job clones Upstream, with the fork as the
+	// remote "fork" that holds the bot's branches.
+	Upstream      string    `json:"upstream,omitempty"`
+	Fork          string    `json:"fork,omitempty"`
+	UpstreamIssue int       `json:"upstream_issue,omitempty"`
+	CIRepo        string    `json:"ci_repo,omitempty"` // fork or upstream: where CIJobs ran
+	CIJobs        []int64   `json:"ci_jobs,omitempty"`
+	RunID         int64     `json:"run_id,omitempty"`
+	RunURL        string    `json:"run_url,omitempty"`
+	Created       time.Time `json:"created"`
 }
 
 // Result is what the model job did.
@@ -63,6 +72,7 @@ type Result struct {
 	ChecksGreen bool          `json:"checks_green"`
 	Report      string        `json:"report,omitempty"`
 	Answer      string        `json:"answer,omitempty"`
+	Plan        string        `json:"plan,omitempty"`
 	Triage      *Triage       `json:"triage,omitempty"`
 	Minutes     float64       `json:"minutes"`
 	RateLimited bool          `json:"rate_limited"`
@@ -87,6 +97,7 @@ const (
 	Answered    = "answered"     // a question answered
 	Triaged     = "triaged"      // an item rated
 	Reviewed    = "reviewed"     // an audit's verdict
+	Planned     = "planned"      // a plan written for a person to approve
 )
 
 // Call is one model call, for the record.

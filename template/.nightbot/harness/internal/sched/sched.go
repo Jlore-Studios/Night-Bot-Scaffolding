@@ -22,6 +22,7 @@ const (
 	Build  = "build"  // build an issue into a pull request
 	Revise = "revise" // change the bot's pull request: review findings, red CI, a person's ask
 	Review = "review" // review a pull request (an audit, by another provider when one is free)
+	Plan   = "plan"   // write a plan a person approves before anything is built (the plan gate)
 )
 
 // IsQuery says whether an action only reads: no change, no checks, the weakest seat.
@@ -84,9 +85,14 @@ func Queue(cfg *config.Config, st *state.State, issues []*github.Issue) []*Item 
 			}
 		}
 		switch {
+		case cfg.PlanGate && !issue.IsPR() && issue.HasLabel(cfg.Label("plan")):
+			item.Action = Plan
 		case !issue.IsPR() && issue.HasLabel(cfg.Label("build")):
-			if mem != nil && mem.PR != 0 {
+			if mem != nil && (mem.PR != 0 || mem.ForkPR != 0 || mem.UpstreamPR != 0) {
 				continue // its pull request carries the work on
+			}
+			if cfg.PlanGate && (mem == nil || mem.ApprovedPlan == "") {
+				continue // nothing is built before a person approves its plan
 			}
 			item.Action = Build
 			if !item.Rated && cfg.Triage && (mem == nil || !mem.Triaged) {
@@ -95,7 +101,9 @@ func Queue(cfg *config.Config, st *state.State, issues []*github.Issue) []*Item 
 		case issue.IsPR() && issue.HasLabel(cfg.Label("revise")) && issue.HasLabel(cfg.Label("pr")) &&
 			strings.EqualFold(issue.User.Login, cfg.BotLogin):
 			item.Action = Revise
-		case issue.IsPR() && issue.HasLabel(cfg.Label("review")):
+		case cfg.Forked() && !issue.IsPR() && issue.HasLabel(cfg.Label("revise")) && mem != nil && mem.Branch != "":
+			item.Action = Revise // in fork mode the issue here carries the work on the fork's branch
+		case issue.IsPR() && issue.HasLabel(cfg.Label("review")) && !cfg.Forked():
 			item.Action = Review
 			if mem != nil {
 				item.Avoid = mem.LastProvider
@@ -145,10 +153,12 @@ func kindRank(action string) int {
 	switch action {
 	case Revise:
 		return 0
+	case Plan:
+		return 1 // a person waits on a plan
 	case Review:
-		return 1
+		return 2
 	}
-	return 2
+	return 3
 }
 
 func priority(issue *github.Issue) int {

@@ -52,12 +52,50 @@ type Config struct {
 	MaxDiffChars       int            `json:"max_diff_chars"`
 	StatusIssueTitle   string         `json:"status_issue_title"`
 	CLIs               map[string]CLI `json:"clis"`
+	// PlanGate has the bot write a plan for every item, as a draft pull request, and build
+	// nothing until an approver approves it (gate 1).
+	PlanGate  bool     `json:"plan_gate"`
+	Approvers []string `json:"approvers"`
+	PlansDir  string   `json:"plans_dir"`
+	// Upstream, when set, is fork mode: this repository is the queue, the bot builds in its fork
+	// of another repository and delivers there by pull request, which a person merges (gate 2).
+	Upstream *Upstream `json:"upstream"`
 
 	// Set by Load, not read from the file.
 	Root      string          `json:"-"`
 	Providers *Providers      `json:"-"`
 	Trust     map[string]bool `json:"-"`
 	Location  *time.Location  `json:"-"`
+}
+
+// Upstream is fork mode's other two repositories and its limits.
+type Upstream struct {
+	// Repo is the product, where delivery pull requests go and a person merges them.
+	Repo string `json:"repo"`
+	// Fork is the bot's own fork of it: its branches, and the sandbox, the fork's branch named
+	// like DefaultBranch, which its approved, CI-green changes merge into.
+	Fork          string `json:"fork"`
+	DefaultBranch string `json:"default_branch"`
+	// ForkMergeMethod merges a change into the sandbox: merge, squash or rebase.
+	ForkMergeMethod string `json:"fork_merge_method"`
+	// MaxOpenPRs is how many of the bot's pull requests may be open upstream at once; a change
+	// that is ready waits in the fork for a slot.
+	MaxOpenPRs int `json:"max_open_prs"`
+	// Reviewers are asked to review an upstream pull request once its CI is green.
+	Reviewers []string `json:"reviewers"`
+	// AutoOpen is the upstream issues the bot takes up by itself.
+	AutoOpen AutoOpen `json:"auto_open"`
+	// NoCIMinutes is how long a head may go without any check reporting before the bot stops
+	// waiting for CI on the fork, or marks a draft upstream pull request ready.
+	NoCIMinutes int `json:"no_ci_minutes"`
+}
+
+// AutoOpen picks upstream issues for the queue: open ones carrying one of Labels, or assigned
+// to the bot with Assigned, at most Max of them open here at once.
+type AutoOpen struct {
+	Labels   []string `json:"labels"`
+	Assigned bool     `json:"assigned"`
+	Max      int      `json:"max_open"`
 }
 
 // Check is one of the repository's own checks, run after every change the model makes.
@@ -256,6 +294,14 @@ func (c *Config) applyDefaults() {
 	def(&c.CIWorkflow, "CI")
 	def(&c.MergeMethod, "squash")
 	def(&c.StatusIssueTitle, "Night bot status")
+	def(&c.PlansDir, "plans")
+	if u := c.Upstream; u != nil {
+		def(&u.DefaultBranch, "main")
+		def(&u.ForkMergeMethod, "merge")
+		defInt(&u.MaxOpenPRs, 2)
+		defInt(&u.AutoOpen.Max, 2)
+		defInt(&u.NoCIMinutes, 30)
+	}
 	defInt(&c.FixPasses, 2)
 	defInt(&c.MaxAudits, 2)
 	defInt(&c.MaxCIFixes, 3)
@@ -275,7 +321,7 @@ func (c *Config) applyDefaults() {
 	if c.MaxTurns == nil {
 		c.MaxTurns = map[string]int{}
 	}
-	for kind, n := range map[string]int{"build": 300, "fix": 200, "review": 100, "ask": 40, "triage": 30} {
+	for kind, n := range map[string]int{"build": 300, "fix": 200, "review": 100, "ask": 40, "triage": 30, "plan": 150} {
 		if c.MaxTurns[kind] == 0 {
 			c.MaxTurns[kind] = n
 		}
@@ -333,6 +379,42 @@ func (c *Config) applyDefaults() {
 
 // Label is a bot label: "build" is "bot:build" with the default prefix.
 func (c *Config) Label(name string) string { return c.LabelPrefix + name }
+
+// Intake labels: an item a person asked for, and one the bot took up from upstream by itself.
+const (
+	Requested  = "requested"
+	AutoOpened = "auto-opened"
+)
+
+// Forked says whether the bot runs in fork mode.
+func (c *Config) Forked() bool { return c.Upstream != nil && c.Upstream.Repo != "" }
+
+// Approver says whether a login may approve a plan: one of approvers, or with none listed, the
+// operator. Approving also needs the person trusted, which the caller checks.
+func (c *Config) Approver(login string) bool {
+	if len(c.Approvers) == 0 {
+		return strings.EqualFold(login, c.Operator)
+	}
+	for _, a := range c.Approvers {
+		if strings.EqualFold(strings.TrimPrefix(a, "@"), login) {
+			return true
+		}
+	}
+	return false
+}
+
+// ApproverList is the approvers as @-mentions, for the bot's comments.
+func (c *Config) ApproverList() string {
+	logins := c.Approvers
+	if len(logins) == 0 && c.Operator != "" {
+		logins = []string{c.Operator}
+	}
+	var out []string
+	for _, l := range logins {
+		out = append(out, "@"+strings.TrimPrefix(l, "@"))
+	}
+	return strings.Join(out, " or ")
+}
 
 // Ordered lists the providers in priority order: those named in priority first, the rest by id.
 func (p *Providers) Ordered() []*Provider {

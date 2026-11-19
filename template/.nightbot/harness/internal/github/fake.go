@@ -37,6 +37,20 @@ type Fake struct {
 	nextNumber int
 	// ConflictOnce makes the next PutFile lose its compare-and-set once.
 	ConflictOnce bool
+
+	// Fork mode and the plan gate.
+	Info           RepoInfo
+	CheckRuns      map[string][]*CheckRun // by commit
+	ReviewComments map[int][]*ReviewComment
+	Requested      map[int][]string
+	BranchHeads    map[string]string
+	Merged         []int
+	Synced         []string
+	// NoMerge makes MergePR refuse, as the upstream repository's client does.
+	NoMerge bool
+	// OnMerge and OnSync stand in for what GitHub does to the repository's git, in the tests.
+	OnMerge func(pr *PR, method string) error
+	OnSync  func(branch string) (string, error)
 }
 
 type fakeFile struct {
@@ -51,8 +65,9 @@ func NewFake() *Fake {
 		Reviews: map[int][]*Review{}, Runs: map[int64]*Run{}, Jobs: map[int64][]*Job{},
 		Logs: map[int64]string{}, Labels: map[string]bool{}, Reactions: map[int64][]string{},
 		AutoMerge: map[int]string{}, Repo: map[string]any{}, Protected: map[string][]string{},
-		Rulesets: map[string]map[string]any{},
-		Login:    "nightbot", RepoName: "o/r", nextID: 1000, nextNumber: 1}
+		Rulesets: map[string]map[string]any{}, CheckRuns: map[string][]*CheckRun{},
+		ReviewComments: map[int][]*ReviewComment{}, Requested: map[int][]string{}, BranchHeads: map[string]string{},
+		Login: "nightbot", RepoName: "o/r", nextID: 1000, nextNumber: 1}
 }
 
 // AddIssue files an issue, or a pull request with pr set, and returns its number.
@@ -66,7 +81,7 @@ func (f *Fake) addIssue(title, body, author string, labels []string) int {
 	n := f.nextNumber
 	f.nextNumber++
 	issue := &Issue{Number: n, Title: title, Body: body, State: "open", User: User{Login: author},
-		CreatedAt: time.Date(2026, 1, 1, 0, n, 0, 0, time.UTC), HTMLURL: fmt.Sprintf("https://github.com/o/r/issues/%d", n)}
+		CreatedAt: time.Date(2026, 1, 1, 0, n, 0, 0, time.UTC), HTMLURL: fmt.Sprintf("https://github.com/%s/issues/%d", f.RepoName, n)}
 	for _, l := range labels {
 		issue.Labels = append(issue.Labels, Label{Name: l})
 	}
@@ -114,6 +129,11 @@ func (f *Fake) GetFile(branch, path string) ([]byte, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	file, ok := f.Files[branch+":"+path]
+	for name, sha := range f.BranchHeads { // a ref may be a commit: a branch's head
+		if !ok && sha == branch {
+			file, ok = f.Files[name+":"+path]
+		}
+	}
 	if !ok {
 		return nil, "", fmt.Errorf("%w: %s:%s", ErrNotFound, branch, path)
 	}
@@ -135,7 +155,18 @@ func (f *Fake) PutFile(branch, path string, content []byte, sha, message string)
 	}
 	f.nextID++
 	f.Files[branch+":"+path] = fakeFile{content: append([]byte(nil), content...), sha: fmt.Sprint("sha", f.nextID)}
+	f.BranchHeads[branch] = fmt.Sprint("commit", f.nextID)
 	return nil
+}
+
+// fresh is a copy of a pull request whose head, for a branch here the fake moved, is the
+// branch's head now, as GitHub's would be.
+func (f *Fake) fresh(pr *PR) *PR {
+	copied := *pr
+	if sha, ok := f.BranchHeads[pr.Head.Ref]; ok && strings.EqualFold(pr.HeadRepo(), f.RepoName) && pr.State == "open" {
+		copied.Head.SHA = sha
+	}
+	return &copied
 }
 
 func (f *Fake) BranchExists(branch string) (bool, error) {
@@ -292,17 +323,19 @@ func (f *Fake) GetPR(number int) (*PR, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: pull request %d", ErrNotFound, number)
 	}
-	copied := *pr
-	return &copied, nil
+	return f.fresh(pr), nil
 }
 
 func (f *Fake) FindPR(head string) (*PR, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	repo := f.RepoName
+	if owner, branch, ok := strings.Cut(head, ":"); ok {
+		repo, head = f.forkName(owner), branch
+	}
 	for _, pr := range f.PRs {
-		if pr.Head.Ref == head && pr.State == "open" {
-			copied := *pr
-			return &copied, nil
+		if pr.Head.Ref == head && pr.State == "open" && strings.EqualFold(pr.HeadRepo(), repo) {
+			return f.fresh(pr), nil
 		}
 	}
 	return nil, nil
@@ -316,15 +349,19 @@ func (f *Fake) CreatePR(head, base, title, body string, draft bool) (*PR, error)
 		URL string `json:"url"`
 	}{URL: fmt.Sprint("pulls/", n)}
 	pr := &PR{Number: n, NodeID: fmt.Sprint("PR_", n), Title: title, Body: body, State: "open",
-		Draft: draft, User: User{Login: f.Login}, HTMLURL: fmt.Sprintf("https://github.com/o/r/pull/%d", n)}
+		Draft: draft, User: User{Login: f.Login}, HTMLURL: fmt.Sprintf("https://github.com/%s/pull/%d", f.RepoName, n)}
+	repo := f.RepoName
+	if owner, branch, ok := strings.Cut(head, ":"); ok {
+		repo, head = f.forkName(owner), branch
+	}
 	pr.Head.Ref = head
 	pr.Head.Repo = &struct {
 		FullName string `json:"full_name"`
-	}{FullName: f.RepoName}
+	}{FullName: repo}
+	f.Issues[n].HTMLURL = pr.HTMLURL
 	pr.Base.Ref = base
 	f.PRs[n] = pr
-	copied := *pr
-	return &copied, nil
+	return f.fresh(pr), nil
 }
 
 func (f *Fake) UpdatePR(number int, title, body string) error {
@@ -490,4 +527,169 @@ func (f *Fake) HasComment(number int, text string) bool {
 		}
 	}
 	return false
+}
+
+// forkName is the repository a fork's owner holds, named as this one is (the tests' convention).
+func (f *Fake) forkName(owner string) string {
+	_, name, _ := strings.Cut(f.RepoName, "/")
+	return owner + "/" + name
+}
+
+func (f *Fake) Repository() (*RepoInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	info := f.Info
+	if info.FullName == "" {
+		info.FullName = f.RepoName
+	}
+	return &info, nil
+}
+
+func (f *Fake) ListAssigned(login string) ([]*Issue, error) {
+	all, _ := f.ListIssues("", "open")
+	var out []*Issue
+	for _, issue := range all {
+		for _, a := range issue.Assignees {
+			if strings.EqualFold(a.Login, login) {
+				out = append(out, issue)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *Fake) CloseIssue(number int, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if issue := f.Issues[number]; issue != nil {
+		issue.State = "closed"
+	}
+	return nil
+}
+
+func (f *Fake) ClosePR(number int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pr := f.PRs[number]; pr != nil {
+		pr.State = "closed"
+		f.Issues[number].State = "closed"
+	}
+	return nil
+}
+
+func (f *Fake) BranchSHA(branch string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if sha, ok := f.BranchHeads[branch]; ok {
+		return sha, nil
+	}
+	if f.Branches[branch] {
+		return "sha-of-" + branch, nil
+	}
+	return "", fmt.Errorf("%w: branch %s", ErrNotFound, branch)
+}
+
+func (f *Fake) CreateBranch(branch, sha string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Branches[branch] = true
+	f.BranchHeads[branch] = sha
+	return nil
+}
+
+func (f *Fake) ResetBranch(branch, sha string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.BranchHeads[branch] = sha
+	return nil
+}
+
+func (f *Fake) SyncFork(branch string) (string, error) {
+	f.mu.Lock()
+	f.Synced = append(f.Synced, branch)
+	sync := f.OnSync
+	f.mu.Unlock()
+	if sync != nil {
+		return sync(branch)
+	}
+	return "none", nil
+}
+
+func (f *Fake) Checks(sha string) ([]*CheckRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*CheckRun
+	for _, c := range f.CheckRuns[sha] {
+		copied := *c
+		out = append(out, &copied)
+	}
+	return out, nil
+}
+
+func (f *Fake) MergePR(number int, method, sha string) error {
+	f.mu.Lock()
+	if f.NoMerge {
+		f.mu.Unlock()
+		return ErrMergeForbidden
+	}
+	pr := f.PRs[number]
+	if pr == nil || pr.State != "open" {
+		f.mu.Unlock()
+		return fmt.Errorf("%w: open pull request %d", ErrNotFound, number)
+	}
+	current := f.fresh(pr)
+	if sha != "" && current.Head.SHA != "" && current.Head.SHA != sha {
+		f.mu.Unlock()
+		return fmt.Errorf("head is %s, not %s", current.Head.SHA, sha)
+	}
+	merge := f.OnMerge
+	copied := *current
+	f.mu.Unlock()
+	if merge != nil {
+		if err := merge(&copied, method); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pr.State, pr.Merged = "closed", true
+	f.Issues[number].State = "closed"
+	f.Merged = append(f.Merged, number)
+	return nil
+}
+
+func (f *Fake) ListReviewComments(number int) ([]*ReviewComment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*ReviewComment(nil), f.ReviewComments[number]...), nil
+}
+
+func (f *Fake) RequestReviewers(number int, logins []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Requested[number] = append(f.Requested[number], logins...)
+	return nil
+}
+
+// AddPRComment adds a comment by author to a pull request, as AddComment does to an issue.
+func (f *Fake) AddPRComment(number int, author, body string) int64 {
+	return f.AddComment(number, author, "CONTRIBUTOR", body)
+}
+
+func (f *Fake) ListOpenPRs() ([]*PR, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var numbers []int
+	for n, pr := range f.PRs {
+		if pr.State == "open" {
+			numbers = append(numbers, n)
+		}
+	}
+	sort.Ints(numbers)
+	var out []*PR
+	for _, n := range numbers {
+		out = append(out, f.fresh(f.PRs[n]))
+	}
+	return out, nil
 }

@@ -12,6 +12,10 @@
 # --ci-workflow  the `name:` of the workflow whose failures the bot fixes (default: CI)
 # --merge-queue  merge through a merge queue: `nightbot setup --repo-settings` then writes a ruleset
 #                with the required checks and the queue (your CI must run on merge_group)
+# --plan-gate    plan every item first; build nothing until an approver approves the plan
+# --upstream R --fork F
+#                fork mode (with the plan gate): build on the fork F of R and deliver to R by pull
+#                request, which a person merges (.nightbot/docs/fork-mode.md)
 # --upgrade      replace only the harness, the machine scripts and the build action, keeping your
 #                configuration, prompts and workflows (diff them against template/ yourself)
 # --force        overwrite an earlier install entirely (your edits to its files are lost)
@@ -24,6 +28,9 @@ operator=""
 repo=""
 ci_workflow="CI"
 merge_queue=false
+plan_gate=false
+upstream=""
+fork=""
 mode=install
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,9 +39,12 @@ while [ $# -gt 0 ]; do
     --repo) repo="${2:?--repo needs a value}"; shift 2 ;;
     --ci-workflow) ci_workflow="${2:?--ci-workflow needs a value}"; shift 2 ;;
     --merge-queue) merge_queue=true; shift ;;
+    --plan-gate) plan_gate=true; shift ;;
+    --upstream) upstream="${2:?--upstream needs OWNER/NAME}"; plan_gate=true; shift 2 ;;
+    --fork) fork="${2:?--fork needs OWNER/NAME}"; shift 2 ;;
     --upgrade) mode=upgrade; shift ;;
     --force) mode=force; shift ;;
-    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown flag $1" >&2; exit 2 ;;
     *) [ -z "$target" ] || { echo "one target directory only" >&2; exit 2; }; target="$1"; shift ;;
   esac
@@ -71,12 +81,17 @@ if [ -z "$repo" ]; then
 fi
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "could not tell OWNER/NAME from origin ($repo); pass --repo" >&2; exit 2; }
 [[ "$ci_workflow" =~ ^[A-Za-z0-9\ _.-]+$ ]] || { echo "--ci-workflow: letters, digits, spaces, _ . - only" >&2; exit 2; }
+repo_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+if [ -n "$upstream$fork" ]; then
+  [[ "$upstream" =~ $repo_re && "$fork" =~ $repo_re ]] || { echo "--upstream and --fork both take OWNER/NAME" >&2; exit 2; }
+fi
 branch="$(git -C "$target" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
 [ -n "$branch" ] || branch="$(git -C "$target" branch --show-current)"
 [ -n "$branch" ] || branch=main
 
 files=(.nightbot .github/actions/nightbot .github/workflows/nightbot-events.yml
   .github/workflows/nightbot-run.yml .github/workflows/nightbot-selftest.yml)
+if [ "$plan_gate" = true ]; then files+=(.github/ISSUE_TEMPLATE/nightbot-request.yml); fi
 for f in "${files[@]}"; do
   if [ -e "$target/$f" ] && [ "$mode" != force ]; then
     echo "$f exists in $target already: --upgrade replaces the harness alone, --force everything" >&2
@@ -84,7 +99,7 @@ for f in "${files[@]}"; do
   fi
 done
 for f in "${files[@]}"; do rm -rf "${target:?}/$f"; done
-mkdir -p "$target/.github/workflows" "$target/.github/actions"
+mkdir -p "$target/.github/workflows" "$target/.github/actions" "$target/.github/ISSUE_TEMPLATE"
 copy "${files[@]}"
 
 config="$target/.nightbot/config.json"
@@ -95,7 +110,17 @@ sed -i.bak \
   -e "s#\"default_branch\": \"main\"#\"default_branch\": \"$branch\"#" \
   -e "s#\"ci_workflow\": \"CI\"#\"ci_workflow\": \"$ci_workflow\"#" \
   -e "s#\"merge_queue\": false#\"merge_queue\": $merge_queue#" \
+  -e "s#\"plan_gate\": false#\"plan_gate\": $plan_gate#" \
   "$config"
+if [ -n "$upstream" ]; then
+  block="{ \"repo\": \"$upstream\", \"fork\": \"$fork\", \"max_open_prs\": 2, \"reviewers\": [], \"auto_open\": { \"labels\": [], \"assigned\": true, \"max_open\": 2 } }"
+  sed -i.bak -e "s#\"upstream\": null#\"upstream\": $block#" "$config"
+fi
+if [ "$plan_gate" = true ]; then
+  request="$target/.github/ISSUE_TEMPLATE/nightbot-request.yml"
+  sed -i.bak -e "s#UPSTREAM_REPO#${upstream:-$repo}#g" "$request"
+  rm -f "$request.bak"
+fi
 rm -f "$config.bak"
 events="$target/.github/workflows/nightbot-events.yml"
 sed -i.bak -e "s#workflows: \[CI\]#workflows: [\"$ci_workflow\"]#" "$events"
@@ -123,5 +148,15 @@ Next (README.md, "Quick start", has the details):
        cd .nightbot/harness && GITHUB_TOKEN=\$(gh auth token) go run ./cmd/nightbot setup --repo-settings
      On a public repository, also allow pull_request_target for .github/workflows/nightbot-events.yml
      alone in the Actions event policies: GitHub blocks it there by default from 2026-12-02.
-  5. Label an issue bot:build, or comment "/nightbot build --force" on it.
+  5. Label an issue bot:build, or comment "/nightbot build --force" on it. With the plan gate, open
+     an issue from the request template instead: the bot plans it, and an approver approves.
 EOF
+if [ -n "$upstream" ]; then
+  cat <<EOF
+
+Fork mode: the bot builds on $fork and delivers to $upstream (.nightbot/docs/fork-mode.md).
+  - Enable Actions on $fork, so $upstream's CI runs on the bot's pull requests there.
+  - Set "approvers", "upstream.reviewers" and "upstream.auto_open.labels" in .nightbot/config.json.
+  - "checks" run in the clone of $upstream; its toolchain goes at the marked spot in nightbot-run.yml.
+EOF
+fi

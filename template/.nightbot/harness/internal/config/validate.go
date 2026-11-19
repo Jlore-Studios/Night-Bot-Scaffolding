@@ -39,6 +39,38 @@ func (c *Config) Validate() error {
 	default:
 		add("merge_method %q: squash, merge or rebase", c.MergeMethod)
 	}
+	if c.PlanGate || c.Forked() {
+		for _, a := range c.Approvers {
+			if !c.Trust[strings.ToLower(strings.TrimPrefix(a, "@"))] {
+				add("approvers: %s is not on trust.txt (an approver must be trusted)", a)
+			}
+		}
+		if len(c.Approvers) == 0 && c.Operator == "" {
+			add("plan_gate: name the approvers, or an operator, who approve plans")
+		}
+		if !labelRE.MatchString(strings.ReplaceAll(c.PlansDir, "/", "_")) || strings.HasPrefix(c.PlansDir, ".") {
+			add("plans_dir %q: a directory such as plans", c.PlansDir)
+		}
+	}
+	if u := c.Upstream; u != nil {
+		if strings.Count(u.Repo, "/") != 1 || strings.Count(u.Fork, "/") != 1 {
+			add("upstream: repo and fork are OWNER/NAME")
+		}
+		if strings.EqualFold(u.Repo, u.Fork) || strings.EqualFold(u.Repo, c.Repo) || strings.EqualFold(u.Fork, c.Repo) {
+			add("upstream: repo, fork and this repository (%s) must be three different repositories", c.Repo)
+		}
+		if !c.PlanGate {
+			add("upstream: fork mode needs plan_gate: true (a person approves each plan)")
+		}
+		switch u.ForkMergeMethod {
+		case "squash", "merge", "rebase":
+		default:
+			add("upstream.fork_merge_method %q: squash, merge or rebase", u.ForkMergeMethod)
+		}
+		if u.MaxOpenPRs < 1 || u.AutoOpen.Max < 0 || u.NoCIMinutes < 1 {
+			add("upstream: max_open_prs and no_ci_minutes are at least 1, auto_open.max_open at least 0")
+		}
+	}
 	for _, check := range c.Checks {
 		if check.Name == "" || check.Run == "" {
 			add("checks: every check needs a name and a run command")
@@ -170,7 +202,7 @@ func (c *Config) Validate() error {
 }
 
 // PromptNames are the templates under .nightbot/prompts/.
-var PromptNames = []string{"system", "build", "fix", "review", "ask", "triage"}
+var PromptNames = []string{"system", "build", "fix", "review", "ask", "triage", "plan"}
 
 func mentions(cli CLI, placeholder string) bool {
 	for _, list := range [][]string{cli.Argv, cli.WriteArgs, cli.ReadArgs, cli.Tail} {

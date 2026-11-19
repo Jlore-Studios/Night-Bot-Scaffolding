@@ -12,6 +12,8 @@ the change may merge with no person reading it first, so the bar is a change you
 
 {{.thread}}
 
+{{.plan}}
+
 ## How to work
 
 1. Understand the task and the code it touches before editing. Find the existing helpers,

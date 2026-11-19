@@ -24,6 +24,11 @@ specific to that project taken out.
 - **Merge queues.** Approved changes join the queue pinned to the reviewed commit; one the queue
   throws out comes back with the newest `main` merged in and the failure fixed, and one that
   conflicts with `main` gets the merge by itself ([merge queue](template/.nightbot/README.md#the-merge-queue)).
+- **A plan gate and fork mode.** Have every item planned first, as a draft pull request a person
+  approves before anything is built; and work on a repository you do not own: the bot builds on
+  its fork, merges green changes into a sandbox there, and delivers upstream by pull request,
+  following its CI and reviews until a person merges it
+  ([fork mode](template/.nightbot/docs/fork-mode.md)).
 - **One Go binary, standard library only**, built and cached by the workflows; no service to host.
 
 ## How it works
@@ -56,7 +61,8 @@ computer, and at least one model subscription (a Claude Pro or Max plan is enoug
    ```
 
    `--ci-workflow` is the `name:` of your CI workflow. Add `--merge-queue` to merge through a
-   merge queue (your CI must then run on `merge_group`). This copies `.nightbot/` (the harness,
+   merge queue (your CI must then run on `merge_group`), `--plan-gate` to have every plan
+   approved before a build, or `--upstream OWNER/NAME --fork OWNER/NAME` for fork mode. This copies `.nightbot/` (the harness,
    its configuration, prompts, docs and machine scripts) and three workflows into your repository.
 
 2. **Give the bot a GitHub identity.** Pushes and pull requests made with a workflow's own

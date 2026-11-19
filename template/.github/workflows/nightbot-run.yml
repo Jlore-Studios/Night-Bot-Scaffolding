@@ -1,4 +1,6 @@
 # One night bot run (.nightbot/README.md): plan -> work -> deliver, one item on one provider.
+# In fork mode (config.json "upstream") the work and deliver jobs clone the upstream repository,
+# with the bot's fork as the remote "fork": the model works there and deliver pushes to the fork.
 #
 #   plan     the bot's token, no model: picks the item and the provider, claims them, writes plan.json.
 #   work     one model login and a read-only token: the model builds, the checks run, a fresh
@@ -26,7 +28,7 @@ on:
       mode:
         description: "What to do"
         type: choice
-        options: [auto, build, revise, review, ask, triage]
+        options: [auto, plan, build, revise, review, ask, triage]
         default: auto
       force:
         description: "Run even outside the providers' hours"
@@ -58,6 +60,8 @@ jobs:
       runs_on: ${{ steps.plan.outputs.runs_on }}
       secret: ${{ steps.plan.outputs.secret }}
       hosted: ${{ steps.plan.outputs.hosted }}
+      product: ${{ steps.plan.outputs.product }}
+      fork: ${{ steps.plan.outputs.fork }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,6 +135,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tmp"
           echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
 
+      - name: Clone the product (fork mode)
+        if: needs.plan.outputs.product != ''
+        env:
+          PRODUCT: ${{ needs.plan.outputs.product }}
+          FORK: ${{ needs.plan.outputs.fork }}
+        run: |
+          git clone -q --no-tags "$GITHUB_SERVER_URL/$PRODUCT.git" "$RUNNER_TEMP/product"
+          git -C "$RUNNER_TEMP/product" remote add fork "$GITHUB_SERVER_URL/$FORK.git"
+          echo "NIGHTBOT_PRODUCT=$RUNNER_TEMP/product" >> "$GITHUB_ENV"
+
       - if: needs.plan.outputs.hosted == 'true'
         uses: actions/setup-node@v4
         with:
@@ -139,6 +153,7 @@ jobs:
       # Your repository's toolchain: add the setup steps your checks (config.json "checks") need
       # here, e.g. actions/setup-python or actions/setup-go, and install your dependencies. A
       # machine of your own installs them once instead (.nightbot/machine/common/extra-setup.sh).
+      # In fork mode the product's clone is $NIGHTBOT_PRODUCT.
 
       - name: Install the model CLI
         if: needs.plan.outputs.hosted == 'true'
@@ -151,7 +166,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         # exec: no shell stays behind holding the secret in its environment. The harness makes its
         # own process unreadable to the model's, which run as the same user.
-        run: exec nightbot work --plan "$RUNNER_TEMP/plan/plan.json" --out "$RUNNER_TEMP/out"
+        run: exec nightbot work --plan "$RUNNER_TEMP/plan/plan.json" --out "$RUNNER_TEMP/out" ${NIGHTBOT_PRODUCT:+--product "$NIGHTBOT_PRODUCT"}
 
       - if: always()
         uses: actions/upload-artifact@v4
@@ -200,6 +215,16 @@ jobs:
           name: work
           path: ${{ runner.temp }}/out
 
+      - name: Clone the product (fork mode)
+        if: needs.plan.outputs.product != ''
+        env:
+          PRODUCT: ${{ needs.plan.outputs.product }}
+          FORK: ${{ needs.plan.outputs.fork }}
+        run: |
+          git clone -q --no-tags "$GITHUB_SERVER_URL/$PRODUCT.git" "$RUNNER_TEMP/product"
+          git -C "$RUNNER_TEMP/product" remote add fork "$GITHUB_SERVER_URL/$FORK.git"
+          echo "NIGHTBOT_PRODUCT=$RUNNER_TEMP/product" >> "$GITHUB_ENV"
+
       - name: Deliver
         env:
           NIGHTBOT_GITHUB_TOKEN: ${{ steps.app.outputs.token || secrets.NIGHTBOT_GITHUB_TOKEN }}
@@ -210,4 +235,5 @@ jobs:
           WORK_STATUS: ${{ needs.work.result }}
         run: |
           mkdir -p "$RUNNER_TEMP/out"
-          nightbot deliver --plan "$RUNNER_TEMP/plan/plan.json" --out "$RUNNER_TEMP/out" --work-status "$WORK_STATUS"
+          nightbot deliver --plan "$RUNNER_TEMP/plan/plan.json" --out "$RUNNER_TEMP/out" --work-status "$WORK_STATUS" \
+            ${NIGHTBOT_PRODUCT:+--product "$NIGHTBOT_PRODUCT"}

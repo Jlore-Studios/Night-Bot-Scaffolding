@@ -15,6 +15,7 @@ It was installed from [Night-Bot-Scaffolding](https://github.com/Jlore-Studios/N
 | [`docs/configuration.md`](docs/configuration.md) | every field of `config.json` and `providers.json` |
 | [`docs/providers.md`](docs/providers.md) | the model CLIs, tiers (weak, medium, strong) and adding a CLI of your own |
 | [`docs/security.md`](docs/security.md) | what keeps the model from doing harm, and what cannot be ruled out |
+| [`docs/fork-mode.md`](docs/fork-mode.md) | the plan gate, and working on a repository you do not own: build on a fork, deliver upstream |
 | [`machine/README.md`](machine/README.md) | running models on a machine of your own: AWS, Azure, Google Cloud or a box you own |
 
 ## Giving it work
@@ -54,6 +55,7 @@ command the bot; everyone else's commands do nothing and their comments never re
 | `/nightbot status` | what runs, the providers and the queue |
 | `/nightbot halt` / `start` | stop starting new runs / start again |
 | `/nightbot suspend <provider> [why]` / `resume <provider>` | stop / restart one provider |
+| `/nightbot plan` / `approve` / `reject [why]` | with the plan gate: plan this issue / approve its plan / turn it down ([fork mode](docs/fork-mode.md)) |
 | `/nightbot help` | this table |
 
 The 👀 reaction means the bot read your command.
@@ -72,6 +74,8 @@ The 👀 reaction means the bot read your command.
 | `ready for merge` | the review approved it, but a person merges it (review-only paths, or no auto-merge) |
 | `difficulty:medium`, `difficulty:hard` | the weakest tier that may build and approve it: medium or strong |
 | `priority:high`, `priority:low` | taken first, or last |
+| `bot:plan`, `bot:awaiting-approval`, `bot:plan-pr` | with the plan gate: queued to plan, its plan waits for an approver, a plan's pull request |
+| `requested`, `auto-opened` | with the plan gate: an item a person asked for, one the bot took up from upstream by itself |
 
 ## What happens to a change
 

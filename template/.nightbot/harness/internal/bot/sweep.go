@@ -73,7 +73,14 @@ func (b *Bot) Sweep() error {
 			return nil
 		})
 	}
-	b.mergeConflicted(st)
+	if b.Cfg.PlanGate {
+		b.planSweep(st)
+	}
+	if b.Cfg.Forked() {
+		b.forkSweep()
+	} else {
+		b.mergeConflicted(st)
+	}
 	if _, err := b.Store.Update("prune", func(s *state.State) error { s.Prune(b.now()); return nil }); err != nil {
 		b.logf("sweep: prune: %v", err)
 	}
@@ -148,6 +155,10 @@ func (b *Bot) StatusMarkdown(snap *Snapshot, full bool) string {
 		w("> [!WARNING]\n> **Halted** by %s. `%s start` starts it again.\n\n", st.HaltedBy, cfg.CommandPrefix)
 	}
 
+	if full && (cfg.PlanGate || cfg.Forked()) {
+		w("%s", b.pipelineMarkdown(st, now))
+	}
+
 	w("## Running now\n\n")
 	if claims := st.Claims(); len(claims) == 0 {
 		w("Nothing.\n\n")
@@ -176,7 +187,9 @@ func (b *Bot) StatusMarkdown(snap *Snapshot, full bool) string {
 	w("\n")
 
 	w("## Queue\n\n")
-	if len(snap.Assignments) == 0 {
+	if len(snap.Assignments) == 0 && cfg.PlanGate {
+		w("Empty. Open an issue with the request template (or comment `%s plan` on one) to queue it.\n\n", cfg.CommandPrefix)
+	} else if len(snap.Assignments) == 0 {
 		w("Empty. Label an issue `%s` (or comment `%s build`) to queue it.\n\n", cfg.Label("build"), cfg.CommandPrefix)
 	} else {
 		w("| Item | Next | Difficulty | Taken by |\n|---|---|---|---|\n")
@@ -264,6 +277,14 @@ func (b *Bot) Setup(repoSettings bool) error {
 	if !repoSettings {
 		return nil
 	}
+	if b.Cfg.Forked() {
+		// Nothing merges here but plans, and upstream is a person's: only the fork has settings
+		// to change. A merge into the sandbox must keep the branch upstream's pull request needs.
+		if err := b.Fork.UpdateRepo(map[string]any{"delete_branch_on_merge": false}); err != nil {
+			return fmt.Errorf("the fork's settings: %w", err)
+		}
+		return nil
+	}
 	if err := b.GH.UpdateRepo(map[string]any{"allow_auto_merge": true, "delete_branch_on_merge": true}); err != nil {
 		return fmt.Errorf("repository settings: %w", err)
 	}
@@ -328,6 +349,11 @@ func (b *Bot) Doctor() []string {
 	}
 	exists, err := b.GH.BranchExists(b.Cfg.StateBranch)
 	ok(err == nil && exists, "the state branch "+b.Cfg.StateBranch+" exists (nightbot setup makes it)")
+	if b.Cfg.Forked() {
+		b.forkDoctor(ok)
+		b.providersDoctor(ok)
+		return lines
+	}
 	protection, err := b.GH.Protection(b.Cfg.DefaultBranch)
 	if err != nil {
 		protection = &github.Protection{}
@@ -341,6 +367,12 @@ func (b *Bot) Doctor() []string {
 		ok(protection.MergeQueue, b.Cfg.DefaultBranch+" merges through a merge queue (setup --repo-settings writes the ruleset)")
 		ok(b.Cfg.CIRunsInMergeQueue(), fmt.Sprintf("the %q workflow runs on merge_group, or the queue waits for its checks for ever", b.Cfg.CIWorkflow))
 	}
+	b.providersDoctor(ok)
+	return lines
+}
+
+// providersDoctor checks the providers, the workflows and the committed off switch.
+func (b *Bot) providersDoctor(ok func(bool, string)) {
 	any := false
 	for _, p := range b.Cfg.Providers.Ordered() {
 		if !p.Enabled {
@@ -361,5 +393,4 @@ func (b *Bot) Doctor() []string {
 		ok(false, err.Error())
 	}
 	ok(!b.HaltFile(), "no .nightbot/HALT")
-	return lines
 }

@@ -16,7 +16,7 @@ on:
   pull_request_review:
     types: [submitted]
   issues:
-    types: [labeled, assigned]
+    types: [opened, labeled, assigned] # opened: a request from the issue template (with the plan gate)
   # _target: this repository's workflow and secrets, never code from the pull request; the job
   # checks out the default branch and reads only the event's payload. `pull_request` would not do:
   # it runs nothing while a pull request has a merge conflict and delivers `closed` unreliably.

@@ -45,12 +45,16 @@ type Worker struct {
 	Repo *gitx.Repo
 	// Auth is the checkout with the read-only token, for the fetches made before any model runs;
 	// after that the harness's git carries no token a model's hook or filter could catch.
-	Auth     *gitx.Repo
-	Runner   *model.Runner
-	CI       CILogs
-	Deadline time.Time
-	Log      io.Writer
-	Now      func() time.Time
+	Auth *gitx.Repo
+	// BaseRemote holds the base branch and BranchRemote the bot's branches: both "origin", or
+	// in fork mode the upstream repository and "fork".
+	BaseRemote   string
+	BranchRemote string
+	Runner       *model.Runner
+	CI           CILogs
+	Deadline     time.Time
+	Log          io.Writer
+	Now          func() time.Time
 	// RunCheck runs one check command; a seam for the tests.
 	RunCheck func(ctx context.Context, command, dir string, env []string) (string, error)
 
@@ -69,6 +73,12 @@ func (w *Worker) Do() *job.Result {
 	}
 	if w.Log == nil {
 		w.Log = io.Discard
+	}
+	if w.BaseRemote == "" {
+		w.BaseRemote = "origin"
+	}
+	if w.BranchRemote == "" {
+		w.BranchRemote = "origin"
 	}
 	w.result = &job.Result{Action: w.Plan.Action, Branch: w.Plan.Branch}
 	defer func() {
@@ -99,6 +109,8 @@ func (w *Worker) Do() *job.Result {
 		w.ask()
 	case "triage":
 		w.triage()
+	case "plan":
+		w.plan()
 	default:
 		panic("unknown action " + w.Plan.Action)
 	}
@@ -142,6 +154,12 @@ func (w *Worker) vars(extra map[string]string) map[string]string {
 		"base": p.Base, "difficulty": p.Difficulty, "model": p.Model, "provider": p.Provider,
 		"checks_list": strings.Join(checks, "\n"), "kind": map[bool]string{true: "pull request", false: "issue"}[p.IsPR],
 		"forbidden_paths": strings.Join(w.Cfg.ForbiddenPaths, ", "),
+		"plan":            "",
+	}
+	if p.PlanText != "" && p.Action != "plan" {
+		v["plan"] = "## The approved plan\n\nA person approved this plan before the build started. Follow it; where the code " +
+			"proves a step of it wrong, do what it was for and say why in your report.\n\n" +
+			prompts.Fence("the approved plan", prompts.Truncate(p.PlanText, 30000))
 	}
 	for k, val := range extra {
 		v[k] = val
@@ -257,11 +275,10 @@ func (w *Worker) note(text string) {
 // checkout puts the item's branch at HEAD and reports the base the change is measured from.
 func (w *Worker) checkout(existing bool) string {
 	p := w.Plan
-	w.auth().MustGit("fetch", "-q", "origin", p.Base)
-	base := "origin/" + p.Base
+	base := w.fetchBase()
 	if existing {
-		w.auth().MustGit("fetch", "-q", "origin", "+refs/heads/"+p.Branch+":refs/remotes/origin/"+p.Branch)
-		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Branch)
+		w.auth().MustGit("fetch", "-q", w.BranchRemote, "+refs/heads/"+p.Branch+":refs/remotes/"+w.BranchRemote+"/"+p.Branch)
+		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, w.BranchRemote+"/"+p.Branch)
 		sha := w.Repo.MustGit("merge-base", base, "HEAD")
 		w.result.Base = sha
 		return sha
@@ -270,6 +287,12 @@ func (w *Worker) checkout(existing bool) string {
 	sha := w.Repo.MustGit("rev-parse", base)
 	w.result.Base = sha
 	return sha
+}
+
+// fetchBase fetches the base branch and returns its remote ref.
+func (w *Worker) fetchBase() string {
+	w.auth().MustGit("fetch", "-q", w.BaseRemote, w.Plan.Base)
+	return w.BaseRemote + "/" + w.Plan.Base
 }
 
 // fetchPR fetches a pull request's head (also a fork's) and returns its ref, holding it to the
@@ -366,7 +389,7 @@ func (w *Worker) revise() {
 // the branch never changes one. It returns the new base the change is measured from.
 func (w *Worker) mergeBase() (string, error) {
 	p := w.Plan
-	onto := "origin/" + p.Base
+	onto := w.BaseRemote + "/" + p.Base
 	message := fmt.Sprintf("Merge %s into %s", p.Base, p.Branch)
 	if _, err := w.Repo.Git("merge", "--no-ff", "--no-edit", "-m", message, onto); err != nil {
 		conflicted, _ := w.Repo.Unmerged()
@@ -473,8 +496,7 @@ func (w *Worker) ask() {
 			w.Repo.MustGit("checkout", "-q", "-B", p.Branch, ref)
 		}
 	} else {
-		w.auth().MustGit("fetch", "-q", "origin", p.Base)
-		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, "origin/"+p.Base)
+		w.Repo.MustGit("checkout", "-q", "-B", p.Branch, w.fetchBase())
 	}
 	prompt := w.render("ask", map[string]string{"change": change,
 		"question": prompts.Fence("question by @"+p.Asker, p.Request)})
@@ -493,8 +515,7 @@ func (w *Worker) ask() {
 }
 
 func (w *Worker) triage() {
-	w.auth().MustGit("fetch", "-q", "origin", w.Plan.Base)
-	w.Repo.MustGit("checkout", "-q", "-B", w.Plan.Branch, "origin/"+w.Plan.Base)
+	w.Repo.MustGit("checkout", "-q", "-B", w.Plan.Branch, w.fetchBase())
 	prompt := w.render("triage", nil)
 	o, ok := w.call("triage", false, prompt)
 	t := &job.Triage{}
@@ -507,6 +528,36 @@ func (w *Worker) triage() {
 			Summary: "The triage gave no readable rating, so this builds as medium."}
 	default:
 		w.result.Outcome, w.result.Triage = job.Triaged, t
+	}
+}
+
+// plan reads the code and writes a plan for a person to approve; it changes nothing.
+func (w *Worker) plan() {
+	p := w.Plan
+	base := w.fetchBase()
+	w.Repo.MustGit("checkout", "-q", "-B", p.Branch, base)
+	w.result.Base = w.Repo.MustGit("rev-parse", base)
+	previous, feedback := "(none: this is the first plan)", "(none)"
+	if p.PlanText != "" {
+		previous = prompts.Fence("the plan so far", prompts.Truncate(p.PlanText, 30000))
+	}
+	if strings.TrimSpace(p.Request) != "" {
+		feedback = prompts.Fence("what to change", p.Request)
+	}
+	prompt := w.render("plan", map[string]string{"previous": previous, "feedback": feedback,
+		"base_sha": w.result.Base})
+	o, ok := w.call("plan", false, prompt)
+	switch {
+	case !ok && w.result.RateLimited:
+		w.result.Outcome = job.RateLimited
+	case o == nil || o.Err != "" || strings.TrimSpace(o.Answer) == "":
+		w.result.Outcome = job.Failed
+		w.result.Error = "the plan call gave no plan"
+		if o != nil && o.Err != "" {
+			w.result.Error = o.Err
+		}
+	default:
+		w.result.Outcome, w.result.Plan = job.Planned, strings.TrimSpace(o.Answer)
 	}
 }
 
@@ -756,7 +807,7 @@ func (w *Worker) redact() {
 	}
 	scrub := func(s string) string { return strings.ReplaceAll(s, secret, "[redacted]") }
 	r := w.result
-	r.Report, r.Answer, r.Error = scrub(r.Report), scrub(r.Answer), scrub(r.Error)
+	r.Report, r.Answer, r.Error, r.Plan = scrub(r.Report), scrub(r.Answer), scrub(r.Error), scrub(r.Plan)
 	if r.Triage != nil {
 		r.Triage.Summary = scrub(r.Triage.Summary)
 	}

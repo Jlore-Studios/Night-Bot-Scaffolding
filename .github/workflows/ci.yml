@@ -69,3 +69,12 @@ jobs:
           go vet ./...
           go test ./...
           go run ./cmd/nightbot validate
+      - name: Install in fork mode and validate it
+        run: |
+          target="$RUNNER_TEMP/queue"
+          git init -q -b main "$target"
+          git -C "$target" remote add origin https://github.com/acme/queue.git
+          ./install.sh "$target" --bot-login widgets-bot --operator someone --upstream big/product --fork widgets-bot/product
+          test -f "$target/.github/ISSUE_TEMPLATE/nightbot-request.yml"
+          cd "$target/.nightbot/harness"
+          go run ./cmd/nightbot validate

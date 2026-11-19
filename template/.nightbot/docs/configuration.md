@@ -39,6 +39,23 @@ fields are errors, so a typo never silently does nothing.
 | `max_diff_chars` | `60000` | how much of the diff the reviewer is shown inline (it can read the rest with git) |
 | `status_issue_title` | `Night bot status` | |
 | `clis` | `{}` | model CLIs added or replaced ([`providers.md`](providers.md)) |
+| `plan_gate` | `false` | plan every item first, as a draft pull request, and build nothing until an approver approves it ([`fork-mode.md`](fork-mode.md)) |
+| `approvers` | `[]` | who may approve a plan; each must be on `trust.txt`. Empty: the operator |
+| `plans_dir` | `plans` | where plans are written in this repository |
+| `upstream` | `null` | fork mode: the bot builds on its fork of another repository and delivers there (below) |
+
+### `upstream` (fork mode)
+
+| Field | Default | What |
+|---|---|---|
+| `repo` | (required) | `OWNER/NAME` of the product: delivery pull requests go there, and a person merges them |
+| `fork` | (required) | the bot's fork of it: its branches, and the sandbox |
+| `default_branch` | `main` | upstream's branch work starts from; the fork's branch of the same name is the sandbox |
+| `fork_merge_method` | `merge` | how a change merges into the sandbox: `merge`, `squash` or `rebase` |
+| `max_open_prs` | `2` | the bot's pull requests open upstream at once (its earlier ones count); ready work waits in the fork |
+| `reviewers` | `[]` | asked to review an upstream pull request once its CI is green |
+| `auto_open` | `{"labels": [], "assigned": false, "max_open": 2}` | upstream issues the bot takes up by itself: open ones with one of `labels`, or assigned to the bot, at most `max_open` of its own open here |
+| `no_ci_minutes` | `30` | how long a head goes with no check reporting before the bot stops waiting for the fork's CI, or marks a draft upstream pull request ready so its CI runs |
 
 Path patterns are globs from the repository root: `*` and `?` stay in one directory, `**` crosses
 directories, and a pattern ending in `/` is everything under that directory (`.github/`,

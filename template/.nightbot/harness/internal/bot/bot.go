@@ -26,13 +26,17 @@ type Bot struct {
 	GH  github.Client // the bot's token: comments, labels, pushes, pull requests
 	// Actions is the workflow run's own token, for starting, reading and cancelling runs.
 	Actions github.Client
-	Store   *state.Store
-	Secrets map[string]bool // which provider secrets are set (names only)
-	Now     func() time.Time
-	Sleep   func(time.Duration)
-	Log     io.Writer
-	RunID   int64
-	RunURL  string
+	// Fork and Upstream are the bot's token on fork mode's other repositories. Upstream's
+	// client is made unable to merge: a person merges there.
+	Fork     github.Client
+	Upstream github.Client
+	Store    *state.Store
+	Secrets  map[string]bool // which provider secrets are set (names only)
+	Now      func() time.Time
+	Sleep    func(time.Duration)
+	Log      io.Writer
+	RunID    int64
+	RunURL   string
 	// Workspace is the checkout deliver pushes from.
 	Workspace string
 }
@@ -109,7 +113,11 @@ func (b *Bot) operator() string { return b.mention(b.Cfg.Operator) }
 // queued lists the open issues and pull requests that carry a queue label.
 func (b *Bot) queued() ([]*github.Issue, error) {
 	var all []*github.Issue
-	for _, name := range []string{"build", "revise", "review"} {
+	names := []string{"build", "revise", "review"}
+	if b.Cfg.PlanGate {
+		names = append(names, "plan")
+	}
+	for _, name := range names {
 		issues, err := b.GH.ListIssues(b.Cfg.Label(name), "open")
 		if err != nil {
 			return nil, err
@@ -254,7 +262,7 @@ func (b *Bot) fail(number int, why string) {
 		b.logf("count a failure on #%d: %v", number, err)
 	}
 	if failures >= b.Cfg.MaxFailures {
-		for _, name := range []string{"build", "revise", "review"} {
+		for _, name := range []string{"build", "revise", "review", "plan"} {
 			b.GH.RemoveLabel(number, b.Cfg.Label(name))
 		}
 		b.GH.AddLabels(number, "human")
@@ -282,5 +290,10 @@ func (b *Bot) Labels() [][3]string {
 		{"difficulty:hard", "d93f0b", "Only a strong model may build and approve it"},
 		{"priority:high", "b60205", "The night bot takes it first"},
 		{"priority:low", "c2e0c6", "The night bot takes it last"},
+		{l("plan"), "0e8a16", "Queued for the night bot to plan"},
+		{l("awaiting-approval"), "fbca04", "The night bot's plan waits for an approver (gate 1)"},
+		{l("plan-pr"), "c5def5", "A plan the night bot wrote"},
+		{config.Requested, "1d76db", "Work a person asked the night bot for"},
+		{config.AutoOpened, "bfd4f2", "Work the night bot took up from upstream by itself"},
 	}
 }
