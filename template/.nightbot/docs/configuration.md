@@ -102,6 +102,7 @@ A provider is one subscription: one login of one CLI, with the models it may run
 | `lanes` | runs it may hold at once |
 | `schedule` | `{"mode": "always"}`, or `{"mode": "window", "start": "HH:MM", "end": "HH:MM"}` in `timezone` (a window may cross midnight). `--force` ignores it |
 | `limits` | `five_hour_minutes` and `seven_day_minutes`: caps on the model minutes the harness counts itself over rolling windows (a run in progress counts from its start). Empty: no cap; a refusal still parks it |
+| `actions` | the only actions it takes (`plan`, `ask`, `triage`, `build`, `revise`, `review`); empty: all. Two providers on one login can split a subscription: plans and questions all day, builds at night |
 | `note` | for people |
 
 ## `trust.txt`

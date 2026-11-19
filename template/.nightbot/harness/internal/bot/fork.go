@@ -701,9 +701,11 @@ func (b *Bot) trackUpstream(n int, mem *state.Item, held bool) {
 				return
 			}
 		}
-		if len(b.Cfg.Upstream.Reviewers) > 0 {
-			if err := b.Upstream.RequestReviewers(pr.Number, b.Cfg.Upstream.Reviewers); err != nil {
-				b.logf("request reviewers on #%d: %v", pr.Number, err)
+		for _, login := range b.Cfg.Upstream.Reviewers { // one at a time: GitHub refuses the lot for one it cannot ask
+			if !b.isBot(login) {
+				if err := b.Upstream.RequestReviewers(pr.Number, []string{login}); err != nil {
+					b.logf("request review from %s on #%d: %v", login, pr.Number, err)
+				}
 			}
 		}
 		b.Store.Update(fmt.Sprintf("#%d in review", n), func(s *state.State) error {

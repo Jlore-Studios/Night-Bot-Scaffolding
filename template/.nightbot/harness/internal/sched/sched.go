@@ -269,7 +269,7 @@ func Assign(cfg *config.Config, st *state.State, queue []*Item, avail []*Availab
 		}
 		for _, a := range avail { // already in priority order, so the first of equals wins
 			seat := a.Provider.SeatFor(item.Tier())
-			if seat == nil || free[a.Provider.ID] <= 0 {
+			if seat == nil || free[a.Provider.ID] <= 0 || !a.Provider.Takes(item.Action) {
 				continue
 			}
 			if better(a, seat) {
@@ -291,7 +291,7 @@ func Assign(cfg *config.Config, st *state.State, queue []*Item, avail []*Availab
 func waits(item *Item, avail []*Availability, free map[string]int) string {
 	var reasons []string
 	for _, a := range avail {
-		if a.Provider.SeatFor(item.Tier()) == nil {
+		if a.Provider.SeatFor(item.Tier()) == nil || !a.Provider.Takes(item.Action) {
 			continue
 		}
 		reason := a.Reason

@@ -162,3 +162,19 @@ func TestAvailable_Reasons(t *testing.T) {
 		}
 	}
 }
+
+func TestAssign_AProviderTakesOnlyItsActions(t *testing.T) {
+	cfg := &config.Config{Providers: &config.Providers{MaxParallel: 4, Providers: map[string]*config.Provider{
+		"day":   {ID: "day", Enabled: true, Lanes: 1, Actions: []string{"plan", "ask"}, Models: []config.Seat{{Model: "o", Tier: "strong"}}},
+		"night": {ID: "night", Enabled: true, Lanes: 1, Models: []config.Seat{{Model: "o", Tier: "strong"}}},
+	}}}
+	avail := []*Availability{{Provider: cfg.Providers.Providers["day"], Free: 1}, {Provider: cfg.Providers.Providers["night"], Free: 0, Reason: "outside its hours"}}
+	queue := []*Item{{Number: 1, Action: Build, Difficulty: "medium"}, {Number: 2, Action: Plan, Difficulty: "medium"}}
+	got := Assign(cfg, &state.State{}, queue, avail)
+	if got[0].Provider != nil || !strings.Contains(got[0].Waits, "night: outside its hours") || strings.Contains(got[0].Waits, "day") {
+		t.Fatalf("the build went to %v (%s)", got[0].Provider, got[0].Waits)
+	}
+	if got[1].Provider == nil || got[1].Provider.ID != "day" {
+		t.Fatalf("the plan should go to the day provider: %+v", got[1])
+	}
+}

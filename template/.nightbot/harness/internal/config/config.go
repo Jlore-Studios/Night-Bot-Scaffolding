@@ -154,7 +154,23 @@ type Provider struct {
 	Lanes    int      `json:"lanes"`
 	Schedule Schedule `json:"schedule"`
 	Limits   Limits   `json:"limits"`
-	Note     string   `json:"note"`
+	// Actions, when set, are the only actions it takes (plan, ask, build, …): a subscription
+	// kept for daytime plans and questions, say, with builds left to another provider's hours.
+	Actions []string `json:"actions"`
+	Note    string   `json:"note"`
+}
+
+// Takes says whether the provider takes an action.
+func (p *Provider) Takes(action string) bool {
+	if len(p.Actions) == 0 {
+		return true
+	}
+	for _, a := range p.Actions {
+		if a == action {
+			return true
+		}
+	}
+	return false
 }
 
 // Seat is one model a provider runs, with its tier.

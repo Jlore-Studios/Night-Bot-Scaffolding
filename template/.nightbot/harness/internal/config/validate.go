@@ -185,6 +185,13 @@ func (c *Config) Validate() error {
 		default:
 			add("%s.schedule.mode %q: always or window", where, prov.Schedule.Mode)
 		}
+		for _, a := range prov.Actions {
+			switch a {
+			case "plan", "ask", "triage", "build", "revise", "review":
+			default:
+				add("%s.actions %q: plan, ask, triage, build, revise or review", where, a)
+			}
+		}
 		if prov.Limits.FiveHourMinutes < 0 || prov.Limits.SevenDayMinutes < 0 {
 			add("%s.limits: minutes cannot be negative", where)
 		}
