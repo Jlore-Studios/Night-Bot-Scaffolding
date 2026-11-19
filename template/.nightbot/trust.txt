@@ -1,3 +1,5 @@
 # Who may command the night bot: one GitHub login a line. The operator in config.json always may,
 # and with "trust_collaborators": true so may anyone GitHub calls an owner, member or collaborator.
 # Comments from anyone else are left out of what the model reads, and their commands do nothing.
+# In fork mode a plan also reads the upstream issue it answers, whoever wrote it, as data; builds
+# and revisions read the copy the plan was made from (docs/security.md).

@@ -123,7 +123,7 @@ if [ "$plan_gate" = true ]; then
 fi
 rm -f "$config.bak"
 events="$target/.github/workflows/nightbot-events.yml"
-sed -i.bak -e "s#workflows: \[CI\]#workflows: [\"$ci_workflow\"]#" "$events"
+sed -i.bak -e "s#workflows: \[CI\]#workflows: [\"$ci_workflow\"]#" -e "s#'BOT_LOGIN'#'$bot_login'#" "$events"
 rm -f "$events.bak"
 selftest="$target/.github/workflows/nightbot-selftest.yml"
 sed -i.bak -e "s#branches: \[main\]#branches: [$branch]#" "$selftest"
@@ -155,6 +155,9 @@ if [ -n "$upstream" ]; then
   cat <<EOF
 
 Fork mode: the bot builds on $fork and delivers to $upstream (.nightbot/docs/fork-mode.md).
+  - Step 4 runs with the bot's own token in fork mode (NIGHTBOT_GITHUB_TOKEN=...): setup changes the
+    fork's settings, which only its owner can.
+  - Upstream's default branch is taken to be main; set upstream.default_branch if it is not.
   - Enable Actions on $fork, so $upstream's CI runs on the bot's pull requests there.
   - Set "approvers", "upstream.reviewers" and "upstream.auto_open.labels" in .nightbot/config.json.
   - "checks" run in the clone of $upstream; its toolchain goes at the marked spot in nightbot-run.yml.
